@@ -36,8 +36,9 @@ The discipline: **no speculative abstractions, but the target shape is known.** 
 
 - Toolchain, editor, and provider strategy decided and in place (see Conventions below).
 - `cargo init --bin` scaffold committed; `cargo run` produces "Hello, world!".
-- [Target architecture](docs/architecture.md) committed — 10-layer stack, event bus, serializable sessions.
-- No real application code yet. Next: v0.1 (single-shot Anthropic POST; waiting on API key from the user).
+- [Target architecture](docs/architecture.md) committed — 5-component-group design.
+- [Roadmap](docs/roadmap.md) committed — 9 named checkpoints across three phases (Foundation → The agent → Craft).
+- No real application code yet. Next: **Checkpoint 1 — Echo** (minimal REPL; no Claude call yet).
 
 ## Architecture
 
@@ -56,6 +57,18 @@ Properties locked in from v0.1:
 Full detail — the component flow diagram, each group's types/traits, extension seams, target module layout, and the 10 commit-level decisions — lives in [`docs/architecture.md`](docs/architecture.md).
 
 Design influences: we studied Claude Code's community deep-dive docs and source to borrow its component decomposition, explicitly skipping complexity that's about Anthropic's production scale (Bash AST parsing, LLM permission classifiers, multi-layer compaction) rather than about what a coding agent fundamentally is.
+
+## Roadmap
+
+[`docs/roadmap.md`](docs/roadmap.md) sequences the work into nine named checkpoints across three phases:
+
+1. **Echo** · 2. **Chat** — *Foundation: not yet an agent*
+3. **Agent loop** ⭐ · 4. **Modes** — *The agent: the heart of the project*
+5. **Streaming** · 6. **Multi-model** · 7. **Hooks** · 8. **Polyglot** · 9. **Resume** — *Craft: making it good*
+
+Each checkpoint pairs a user-visible capability with 1–3 new Rust concepts. Checkpoint 3 ("Agent loop") is the moment cawir becomes a real coding agent — read + write + shell tools in the dispatch/execute/feedback cycle that defines every coding-agent product.
+
+The roadmap is a living document — checkpoints will split, merge, and reorder as we actually implement.
 
 ## Conventions
 
