@@ -33,17 +33,32 @@ cawir> /help
 cawir> /exit
 ```
 
-**Rust concepts introduced.**
+**Sub-steps** — split to keep each step's Rust surface minimal:
 
-- `String` vs `&str` — when do you own text vs borrow it?
-- `std::io::{stdin, BufRead, Write}` — line-based I/O
-- `Result<T, E>` and the `?` operator
-- `loop` and `break`
-- `match` on string slices
+### 1a — First read
+
+Print a prompt, read one line from stdin, print it back, exit.
+
+- *New Rust:* `std::io::{stdin, Write}`, `String` (owned text), `Result<T, E>`, the `?` operator, `print!` + `flush` (why `println!` isn't enough for a prompt).
+- *Done when:* `cargo run` prompts `cawir> `, accepts one line of input, echoes it back, and exits.
+
+### 1b — Loop forever
+
+Wrap 1a in a `loop`. Exit on Ctrl-D (EOF) or when `read_line` returns `Ok(0)`.
+
+- *New Rust:* `loop` and `break`, pattern matching on `read_line`'s return value to detect EOF.
+- *Done when:* you can type many lines and each is echoed. Ctrl-D ends the program cleanly.
+
+### 1c — Slash commands
+
+Recognize `/exit` (quit) and `/help` (print the command list). Anything else echoes.
+
+- *New Rust:* `match` on `&str`, `str::trim`, `str::starts_with`, the difference between `String` (owned) and `&str` (borrowed) when comparing.
+- *Done when:* `/exit` quits cleanly; `/help` prints a two-line command list; anything else echoes.
 
 **Architecture components touched.** Surface.
 
-**Done when.** You can type something, see it echoed, type `/exit`, and the program exits cleanly. `/help` shows the two available commands.
+**Final state.** Everything the goal promises — type something, see it echoed, `/exit` quits, `/help` lists commands.
 
 ---
 
@@ -58,22 +73,53 @@ cawir> what did I just ask?
 claude: You asked what my name is.
 ```
 
-**Rust concepts introduced.**
+This is the biggest Rust jump in the roadmap (async, crates, serde, modules, thiserror, env vars — all landing in one checkpoint). Breaking it into six small sub-steps keeps each one to one or two new concepts.
 
-- Adding crates: `reqwest`, `tokio`, `serde`, `serde_json` (walk through why each is the right choice)
-- `async`/`await` — the `#[tokio::main]` entry point, awaiting futures
-- `#[derive(Serialize, Deserialize)]` — making Rust types talk to JSON
-- `Vec<T>` for conversation history
-- Structs and enums with variant data — the `Session`, `Message`, `ContentBlock` types from the architecture doc
-- Modules — the first `main.rs` → `main.rs` + `lib.rs` + `session.rs` + `error.rs` split (architecture decisions #6, #7)
-- `thiserror` — proper error enum from v0.1
-- `std::env::var` — reading `ANTHROPIC_API_KEY`
+### 2a — First HTTP call
 
-**Architecture components touched.** Surface, Core engine (minimal agent loop — no tool dispatch yet), External (a hard-coded Anthropic call, not yet a `Provider` trait).
+Fetch a plain-text endpoint (e.g. `https://api.github.com/zen` — returns a one-line zen quote). No Claude, no JSON — just proving the HTTP plumbing works.
 
-**Done when.** You can have a 5-turn conversation with Claude about anything, and Claude's replies show awareness of earlier turns.
+- *New Rust:* adding crates to `Cargo.toml` (`reqwest`, `tokio`), `async`/`await`, `#[tokio::main]` attribute.
+- *Done when:* `cargo run` fetches and prints a line of GitHub Zen.
 
-**Watch-out.** The biggest single-checkpoint Rust concept jump — async + crates + serde + modules all landing at once. If it feels overwhelming mid-flight, split: "first call" (one prompt, one response) before "conversation" (multi-turn with `Vec<Message>`).
+### 2b — Parse JSON
+
+Fetch a JSON endpoint and parse the response into a Rust struct. Suggested target: `https://api.github.com/repos/rust-lang/rust` (a fixed public endpoint, extract a couple of fields like `description` and `stargazers_count`).
+
+- *New Rust:* `#[derive(Deserialize)]` with `serde`, `reqwest::Response::json::<T>().await?`, struct fields with `#[serde(rename = "...")]` when needed.
+- *Done when:* `cargo run` prints, e.g., the star count and description of the rust-lang/rust repo.
+
+### 2c — First Claude call
+
+Hard-coded "hello" POST to Anthropic's `/v1/messages`. Print Claude's reply.
+
+- *New Rust:* `#[derive(Serialize)]` for request bodies, custom HTTP headers (`anthropic-version`, `x-api-key`, `content-type`), `std::env::var` for `ANTHROPIC_API_KEY`, basic error handling with `Box<dyn Error>` (we'll upgrade to `thiserror` in 2f).
+- *Done when:* `cargo run` prints a Claude-generated reply to a hard-coded "hello" prompt.
+
+### 2d — Wire with the REPL
+
+Replace the hard-coded prompt with user input from the Checkpoint 1 REPL. Each line → one-shot Claude call → printed reply. No history yet — every message is independent.
+
+- *New Rust:* combining a sync input loop with async calls (either restructure `main` as `async` under `#[tokio::main]`, or use a tokio runtime handle).
+- *Done when:* you can ask Claude one question per line in the REPL and see replies.
+
+### 2e — Multi-turn conversation
+
+Maintain a `Vec<Message>` across turns. Send the full history on each call so Claude has context.
+
+- *New Rust:* `Vec<T>` in practice, `struct` and `enum` with variant data (the `Session`, `Message`, `ContentBlock` shapes from `docs/architecture.md`). Pattern matching on enum variants.
+- *Done when:* Claude's reply to turn N shows awareness of turn N-1.
+
+### 2f — Cleanup
+
+Split `main.rs` into `main.rs` + `lib.rs` + `session.rs` + `error.rs` per architecture decision #6. Replace `Box<dyn Error>` with a proper `thiserror` enum per decision #7. Establish the module pattern we'll use from here on.
+
+- *New Rust:* `mod`, `pub`, `use`, module visibility rules, `#[derive(thiserror::Error)]`, `#[from]` attribute for error conversion.
+- *Done when:* code is organized per the architecture doc's target module layout (even if only a subset of files exist); `main.rs` is thin; tests can sit next to modules.
+
+**Architecture components touched.** Surface (reused from Checkpoint 1), Core engine (minimal — no tool dispatch yet), External (a hard-coded Anthropic call, not yet a `Provider` trait).
+
+**Final state.** A working multi-turn conversation with Claude, all code organized in the module shape we'll grow from.
 
 ---
 

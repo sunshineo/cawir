@@ -38,7 +38,7 @@ The discipline: **no speculative abstractions, but the target shape is known.** 
 - `cargo init --bin` scaffold committed; `cargo run` produces "Hello, world!".
 - [Target architecture](docs/architecture.md) committed — 5-component-group design.
 - [Roadmap](docs/roadmap.md) committed — 9 named checkpoints across three phases (Foundation → The agent → Craft).
-- No real application code yet. Next: **Checkpoint 1 — Echo** (minimal REPL; no Claude call yet).
+- No real application code yet. Next: **Checkpoint 1a — First read** (single line from stdin, echoed back; no loop, no Claude, no crates).
 
 ## Architecture
 
