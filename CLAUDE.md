@@ -42,13 +42,9 @@ Do not scaffold a large architecture upfront. Each addition should be motivated 
 
 Toolchain installed and verified (2026-04-23). No project code yet. Two foundational decisions still pending before `cargo new`.
 
-## Pending decisions (to discuss in depth, in order)
+## Pending decisions
 
-These are not yet decided. Do not assume defaults — work through them with the author before writing code or updating this file with the outcome.
-
-1. **Model provider & API shape** — Anthropic Messages API vs OpenAI vs local (Ollama) vs provider-agnostic abstraction; tradeoffs for a *learning* project (clarity of the wire format, quality of tool-use support, cost, offline-ability); whether to hand-roll HTTP+JSON or use an SDK; how the API key is supplied.
-
-Once decided, move it to the "Conventions" section with the outcome and rationale.
+All three foundational decisions now settled. See Conventions below.
 
 ## Conventions
 
@@ -69,9 +65,42 @@ Once decided, move it to the "Conventions" section with the outcome and rational
 - **Editor config in repo:** not committed. Solo learning project — keep the repo clean. Revisit if collaboration starts.
 - **Verified 2026-04-23:** rust-analyzer binary downloaded (v0.3.2870-standalone), inlay hints render, hover docs work, error diagnostics + quick-fix suggestions work. CodeLLDB installed but not yet exercised — will be tested when cawir has code worth stepping through.
 
+### Model provider & API shape (decided 2026-04-23)
+
+**Product framing.** cawir is a BYO-model coding agent. The user supplies the credentials; cawir does not enforce provider ToS — it warns where relevant and leaves credential choice to the user.
+
+**Approach.** Hand-rolled HTTP + JSON (`reqwest` + `serde` + `tokio`). No model SDK. The wire protocol is part of what we're learning.
+
+**Multi-provider — grown, not pre-designed.** Rule of Three:
+- **v0**: Anthropic-only. No abstraction. Get the agent loop working concretely.
+- **v1**: Add OpenAI. *Now* extract a `Provider` trait from the two concrete impls.
+- **v2**: Add Ollama. Pressure-test the abstraction.
+
+**Provider and Auth are orthogonal abstractions.** Two separate traits:
+- `Provider` — wire format (how to build a request, how to parse a response).
+- `AuthMethod` — how credentials attach to an HTTP request (header name/format).
+
+Each provider declares which auth methods it accepts. Matrix:
+
+| Provider | Valid auth methods | Notes |
+|---|---|---|
+| Anthropic | `ApiKey` | Claude subscription OAuth is **banned** by Anthropic ToS (Feb 20, 2026 update, enforced Apr 4, 2026). cawir deliberately does not implement it. |
+| OpenAI | `ApiKey`, `CodexOAuth` | ChatGPT subscription OAuth is **officially supported** by OpenAI for third-party apps. |
+| Ollama | `None` | Local, no auth. |
+
+**Credential lookup order** (per provider, when resolving a configured credential):
+1. macOS Keychain (crate: `keyring`)
+2. Environment variable (`std::env::var`)
+3. `.env` file (crate: `dotenvy`)
+
+**Provider selection at startup.** Remember the last-used provider in a config file at the OS-appropriate path (`directories` crate). First launch defaults to the first provider whose credentials are available. Override/change via a `/provider <name>` slash command inside the REPL.
+
+**Streaming.** Not in v0–v2. Later milestone.
+
+**Starting credentials.** User will obtain an Anthropic API key from console.anthropic.com. No OpenAI or Ollama yet — those come with v1 and v2.
+
 ### Still to be decided
 
-- _Model provider & API shape_: pending discussion.
 - _Project layout_: TBD — will follow Cargo defaults until there's a reason not to.
 - _Error handling_: TBD — likely start with `Box<dyn Error>`, graduate to `anyhow`/`thiserror` when the tradeoffs are visible.
 - _Async runtime_: TBD — `tokio` is the default when async is introduced.
