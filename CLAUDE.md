@@ -41,21 +41,21 @@ The discipline: **no speculative abstractions, but the target shape is known.** 
 
 ## Architecture
 
-cawir is composed of 10 layers — from the REPL/transport at the top to the provider/auth/credential/settings stack at the bottom. Several layers (the event bus and the session model especially) are load-bearing enough to commit to their type shapes from v0.1, even though most layers ship as empty stubs or are absent in early versions.
+cawir is a **component graph** centered on the agent loop, organized into five functional groups: **Surface** (REPL + slash commands), **Core engine** (agent loop + session + prompt + event dispatch), **Capabilities** (tool registry, hook registry), **Policy** (permission modes + validators), and **External** (provider, auth, credential chain, settings resolver). It is not a layered stack — the agent loop at the center fans out to multiple components; the REPL consumes agent events alongside parsing slash commands locally.
 
 Properties locked in from v0.1:
 
 - **Async + streaming loop.** `agent::run` returns a `Stream<AgentEvent>`; the REPL consumes it.
-- **Typed event bus.** Lifecycle events (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, …) dispatched to hook handlers. `PreToolUse` handlers can modify or block.
+- **Typed lifecycle events.** `AgentEvent` enum (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, …) dispatched synchronously to hooks (who can modify/deny) and asynchronously into the REPL stream (observation only).
 - **Self-describing tools.** Each tool is a `Tool` trait impl declaring name, JSON schema, description, and execution logic.
-- **Permission = mode + per-tool validator.** Modes: `Default`, `Plan`, `AcceptEdits`, `Bypass`.
+- **Permission = mode + per-tool validator + PreToolUse hook.** Modes: `Default`, `Plan`, `AcceptEdits`, `Bypass`.
 - **Provider ⊥ Auth.** Separate traits. Each provider declares which auth methods it accepts.
 - **Session is pure data.** `Session` derives `Serialize`/`Deserialize` from v0.1; `/resume` later becomes an implementation, not a schema migration.
-- **One `SettingsResolver`.** User → project → local merge, used by hooks, tools, MCP (later), and anything else that reads config.
+- **One `SettingsResolver`.** User → project → local merge, used everywhere config is read.
 
-Full detail — the 10-layer diagram, each layer's types/traits, extension seams, target module layout, and the 10 commit-level decisions — lives in [`docs/architecture.md`](docs/architecture.md).
+Full detail — the component flow diagram, each group's types/traits, extension seams, target module layout, and the 10 commit-level decisions — lives in [`docs/architecture.md`](docs/architecture.md).
 
-Design influences: we studied Claude Code's community deep-dive docs and source to borrow its layer decomposition, explicitly skipping complexity that's about Anthropic's production scale (Bash AST parsing, LLM permission classifiers, multi-layer compaction) rather than about what a coding agent fundamentally is.
+Design influences: we studied Claude Code's community deep-dive docs and source to borrow its component decomposition, explicitly skipping complexity that's about Anthropic's production scale (Bash AST parsing, LLM permission classifiers, multi-layer compaction) rather than about what a coding agent fundamentally is.
 
 ## Conventions
 
