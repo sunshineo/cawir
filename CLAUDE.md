@@ -22,15 +22,9 @@ The author does not know Rust. When you write or review code here:
 
 ### Grow the codebase organically
 
-Do not scaffold a large architecture upfront. Each addition should be motivated by a concrete need the author can see. Rough progression the project is aimed at (subject to change — don't implement ahead):
+Do not implement the architecture all at once. The [target architecture](docs/architecture.md) is known — 10 layers, typed event bus, serializable sessions, provider/auth split — but each version ships with only the minimum that works. v0.1 is probably ~100 lines with no trait abstraction yet. Each subsequent version extracts one more layer from the target, informed by concrete code, not by planning ahead.
 
-1. `cargo new` + hello world — understand `Cargo.toml`, `src/main.rs`, `cargo run`, `cargo build`.
-2. Read a prompt from stdin, print it back. Introduce `String`, `io`, `Result`, `?`.
-3. Call the Anthropic Messages API with that prompt, print the response. Introduce crates (`reqwest`, `serde`, `tokio`), async, JSON (de)serialization, env vars for the API key.
-4. Turn it into a loop — multi-turn conversation. Introduce `Vec`, struct definitions for messages.
-5. Add a single read-only tool (e.g. `read_file`). Introduce tool-use schema, `match` on tool names, error propagation.
-6. Add a write tool with a permission prompt. Introduce user-confirmation flow.
-7. Further tools, streaming, context management, etc. — decide later.
+The discipline: **no speculative abstractions, but the target shape is known.** That's the difference between "grown organically" and "improvised." When we defer a `Provider` trait at v0.1, we know where it will live when we extract it from two concrete impls at v0.6 — we're not guessing.
 
 ### Code style
 
@@ -38,13 +32,30 @@ Do not scaffold a large architecture upfront. Each addition should be motivated 
 - Comments only when the *why* is non-obvious. Rust's type system already documents most *what*s.
 - When introducing a new crate, explain what it does and why this crate vs alternatives (briefly).
 
-## Current state
+## Current state (as of 2026-04-23)
 
-Toolchain installed and verified (2026-04-23). No project code yet. Two foundational decisions still pending before `cargo new`.
+- Toolchain, editor, and provider strategy decided and in place (see Conventions below).
+- `cargo init --bin` scaffold committed; `cargo run` produces "Hello, world!".
+- [Target architecture](docs/architecture.md) committed — 10-layer stack, event bus, serializable sessions.
+- No real application code yet. Next: v0.1 (single-shot Anthropic POST; waiting on API key from the user).
 
-## Pending decisions
+## Architecture
 
-All three foundational decisions now settled. See Conventions below.
+cawir is composed of 10 layers — from the REPL/transport at the top to the provider/auth/credential/settings stack at the bottom. Several layers (the event bus and the session model especially) are load-bearing enough to commit to their type shapes from v0.1, even though most layers ship as empty stubs or are absent in early versions.
+
+Properties locked in from v0.1:
+
+- **Async + streaming loop.** `agent::run` returns a `Stream<AgentEvent>`; the REPL consumes it.
+- **Typed event bus.** Lifecycle events (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, …) dispatched to hook handlers. `PreToolUse` handlers can modify or block.
+- **Self-describing tools.** Each tool is a `Tool` trait impl declaring name, JSON schema, description, and execution logic.
+- **Permission = mode + per-tool validator.** Modes: `Default`, `Plan`, `AcceptEdits`, `Bypass`.
+- **Provider ⊥ Auth.** Separate traits. Each provider declares which auth methods it accepts.
+- **Session is pure data.** `Session` derives `Serialize`/`Deserialize` from v0.1; `/resume` later becomes an implementation, not a schema migration.
+- **One `SettingsResolver`.** User → project → local merge, used by hooks, tools, MCP (later), and anything else that reads config.
+
+Full detail — the 10-layer diagram, each layer's types/traits, extension seams, target module layout, and the 10 commit-level decisions — lives in [`docs/architecture.md`](docs/architecture.md).
+
+Design influences: we studied Claude Code's community deep-dive docs and source to borrow its layer decomposition, explicitly skipping complexity that's about Anthropic's production scale (Bash AST parsing, LLM permission classifiers, multi-layer compaction) rather than about what a coding agent fundamentally is.
 
 ## Conventions
 
@@ -99,10 +110,11 @@ Each provider declares which auth methods it accepts. Matrix:
 
 **Starting credentials.** User will obtain an Anthropic API key from console.anthropic.com. No OpenAI or Ollama yet — those come with v1 and v2.
 
-### Still to be decided
+### Other conventions (decided in architecture doc)
 
-- _Project layout_: TBD — will follow Cargo defaults until there's a reason not to.
-- _Error handling_: TBD — likely start with `Box<dyn Error>`, graduate to `anyhow`/`thiserror` when the tradeoffs are visible.
-- _Async runtime_: TBD — `tokio` is the default when async is introduced.
+- **Project layout:** per `docs/architecture.md` target module layout. Early versions start with a subset.
+- **Error handling:** `thiserror` enum from v0.1. Not `anyhow`, not `Box<dyn Error>`.
+- **Async runtime:** `tokio`.
+- **Serde discipline:** every type in `Session` derives `Serialize`/`Deserialize` from v0.1 (even before `/resume` ships).
 
-Update this file as real conventions get chosen — don't document guesses.
+Update this file as new conventions emerge — don't document guesses.
