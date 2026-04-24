@@ -32,6 +32,17 @@ The discipline: **no speculative abstractions, but the target shape is known.** 
 - Comments only when the *why* is non-obvious. Rust's type system already documents most *what*s.
 - When introducing a new crate, explain what it does and why this crate vs alternatives (briefly).
 
+### Implementation workflow — write, review, learn, commit
+
+For each checkpoint (or sub-step) from [`docs/roadmap.md`](docs/roadmap.md):
+
+1. **Write the code.** Apply the edits; do NOT commit yet. The user reads the diff in VS Code.
+2. **Discuss.** The user asks about anything unclear — syntax, idioms, why-this-not-that. This is where Rust concepts get taught in context.
+3. **Save learnings.** Significant discussion points get distilled into a `learnings/*.md` file, organized by topic (not by chronology).
+4. **Commit.** Once the user is satisfied and learnings are saved, commit with a message that references the checkpoint (e.g. `feat: 1a — first read`).
+
+Every implementation step is a teaching opportunity. The trail of `learnings/` files is the durable record of what's been learned.
+
 ## Current state (as of 2026-04-23)
 
 - Toolchain, editor, and provider strategy decided and in place (see Conventions below).
