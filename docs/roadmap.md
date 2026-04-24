@@ -153,6 +153,6 @@ Components: Core engine, Surface.
 
 ## Beyond Checkpoint 9 (speculative)
 
-MCP tools · plugin loading · subagents · auto-mode classifier · context compaction · memory extraction · TUI upgrade · remote transport.
+MCP tools · plugin loading · subagents · auto-mode classifier · context compaction · memory extraction · TUI upgrade ([Ratatui](https://ratatui.rs) + Crossterm) · remote transport.
 
-Each has a seam in [`architecture.md`](architecture.md).
+Each has a seam in [`architecture.md`](architecture.md). The TUI upgrade specifically is a Surface-layer swap: Ratatui consumer replaces the `println!`-based REPL, both consuming the same `Stream<AgentEvent>`. Agent loop and everything below stay identical.

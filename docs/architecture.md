@@ -354,7 +354,7 @@ Things not built in v1 but with a clear place in the architecture:
 | **Auto-mode classifier** | Add `PermissionMode::Auto`; its implementation calls an LLM via `Provider` |
 | **Context compaction** | Strategy pattern: `fn compact(&self, s: &mut Session)` |
 | **Session memory extraction** | `MemoryStore` consumes `Session` at `SessionEnd`, writes consolidated memory |
-| **Richer terminal UI** | Replace REPL with a `ratatui` consumer of the same `Stream<AgentEvent>` |
+| **Richer terminal UI** | Replace REPL with a [Ratatui](https://ratatui.rs) consumer (Crossterm as the cross-platform backend) of the same `Stream<AgentEvent>`. Ratatui is the flagship Rust TUI library (immediate-mode rendering; used in production by OpenAI's Codex CLI, Netflix, AWS). Only the Surface layer changes — agent loop, event bus, tools all untouched. |
 | **Remote transports (WebSocket, SSE)** | Another consumer of the same stream |
 | **Daemon / headless mode** | Another consumer of the same stream; supervisor wrapping `agent::run` |
 | **Prompt caching** | Each `PromptSection` carries `cache_breakpoint: bool`; provider translates |
