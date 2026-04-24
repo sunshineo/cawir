@@ -37,7 +37,7 @@ Components: Surface.
 
 Multi-turn conversation with Claude. Biggest Rust jump — seven sub-steps.
 
-- **2a-i — Async entry point.** Add `tokio`; make main `#[tokio::main] async fn`. Behavior unchanged — same prompt, same loop, same exit. *Rust:* adding a crate with feature flags, `#[tokio::main]` proc macro, `async fn` syntax (no `.await` yet).
+- **2a-i — Async entry point** *(done 2026-04-24)*. Add `tokio`; make main `#[tokio::main] async fn`. Behavior unchanged — same prompt, same loop, same exit. *Rust:* adding a crate with feature flags, `#[tokio::main]` proc macro, `async fn` syntax (no `.await` yet).
 - **2a-ii — First HTTP call.** Add `reqwest`; fetch a plain-text endpoint (e.g. `api.github.com/zen`) and print it before the REPL loop. Change main's return to `Result<(), Box<dyn Error>>` so `?` can propagate both `io::Error` and `reqwest::Error`. *Rust:* `reqwest::get`, chained `.await?`, `Box<dyn Error>` as a catch-all type-erased error, automatic error conversion via the `From` trait.
 - **2b — Parse JSON.** Fetch a JSON endpoint, deserialize into a struct. *Rust:* `#[derive(Deserialize)]`, `.json::<T>().await?`.
 - **2c — First Claude call.** Hard-coded "hello" POST. *Rust:* `#[derive(Serialize)]`, custom headers, `std::env::var`.

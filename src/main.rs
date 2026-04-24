@@ -1,6 +1,7 @@
 use std::io::{self, Write};
 
-fn main() -> io::Result<()> {
+#[tokio::main]
+async fn main() -> io::Result<()> {
     loop {
         print!("cawir> ");
         io::stdout().flush()?;
