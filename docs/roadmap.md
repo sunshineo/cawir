@@ -21,8 +21,11 @@ No speculative abstractions — but the target in [`architecture.md`](architectu
 Minimal REPL with `/exit` and `/help`.
 
 - **1a — First read** *(done 2026-04-23)*. Prompt, read one line, echo, exit. *Rust:* `stdin`, `String`, `Result`, `?`, `print!`+`flush`.
+    - *Iterates into:* `print!`/`read_line` is a Surface-layer-only pattern. It swaps out for [Ratatui](https://ratatui.rs) + Crossterm widgets if/when we take the TUI-upgrade seam (post-CP9, speculative). The agent loop underneath is unaffected.
 - **1b — Loop forever** *(done 2026-04-23)*. Wrap 1a in `loop`; exit on EOF. *Rust:* `loop`, `break`, EOF detection.
+    - *Iterates into:* The `loop { read stdin → dispatch }` shape stays largely unchanged through Chat (CP2) and Agent loop (CP3). At Hooks (CP7) the REPL becomes a `Stream<AgentEvent>` consumer and the loop shifts to event-driven (`while let Some(ev) = stream.next().await`). The outer stdin loop survives above that as a "read user input" pump.
 - **1c — Slash commands** *(done 2026-04-23)*. `/exit`, `/help`, else echo. *Rust:* `match` on `&str`, `trim`, `starts_with`.
+    - *Iterates into:* The hardcoded `match` extracts into a `Command` trait + `CommandRegistry` around CP6-7, when `/provider <name>` introduces the first slash command with an argument and hook-configured commands add the first dynamic source. Plugin-loaded commands come later (post-CP9 seam). Each current `match` arm maps one-to-one to a future registry entry — the refactor is a lift, not a rewrite.
 
 *Deferred:* `Command` trait + `CommandRegistry` → ~CP6-7 (when `/provider` adds arguments and hook-registered commands add a dynamic source). Plugin-loaded commands → post-CP9. Write the 1c match so each arm is one refactor from a registry lookup.
 
