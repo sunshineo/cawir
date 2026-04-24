@@ -51,7 +51,7 @@ Every implementation step is a teaching opportunity. The trail of `learnings/` f
 - [Roadmap](docs/roadmap.md) committed — 9 named checkpoints across three phases (Foundation → The agent → Craft).
 - **Checkpoint 1 (Echo) done** (2026-04-23): 1a, 1b, 1c all complete. REPL loops, handles `/exit`, `/help`, rejects unknown `/commands`, echoes everything else.
 - Four learnings notes distilled from the Echo checkpoints: `05-ownership-and-borrowing`, `06-traits-and-scope`, `07-result-question-mark-unit`, `08-match-patterns-and-bindings`.
-- Next: **Checkpoint 2 — Chat**, starting with **2a — First HTTP call** (fetch a plain-text endpoint; introduces `reqwest` + `tokio` + `async`/`await`).
+- Next: **Checkpoint 2 — Chat**, starting with **2a-i — Async entry point** (add `tokio`; make main `#[tokio::main] async fn`; no new behavior yet — pure async plumbing before HTTP lands at 2a-ii).
 
 ## Architecture
 
