@@ -1,7 +1,21 @@
 use std::io::{self, Write};
 
 #[tokio::main]
-async fn main() -> io::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = reqwest::Client::builder()
+        .user_agent("cawir/0.1")
+        .build()?;
+
+    let zen = client
+        .get("https://api.github.com/zen")
+        .send()
+        .await?
+        .text()
+        .await?;
+
+    println!("github says: {}", zen.trim());
+    println!();
+
     loop {
         print!("cawir> ");
         io::stdout().flush()?;
