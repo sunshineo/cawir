@@ -12,8 +12,25 @@ fn main() -> io::Result<()> {
             break;
         }
 
-        println!("you said: {}", line.trim());
+        let trimmed = line.trim();
+        match trimmed {
+            "" => continue,
+            "/exit" => break,
+            "/help" => print_help(),
+            other => {
+                if other.starts_with('/') {
+                    println!("unknown command: {}", other);
+                } else {
+                    println!("you said: {}", other);
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+fn print_help() {
+    println!("  /exit   quit the REPL");
+    println!("  /help   show this help");
 }
