@@ -49,8 +49,9 @@ Every implementation step is a teaching opportunity. The trail of `learnings/` f
 - `cargo init --bin` scaffold committed; `cargo run` produces "Hello, world!".
 - [Target architecture](docs/architecture.md) committed — 5-component-group design.
 - [Roadmap](docs/roadmap.md) committed — 9 named checkpoints across three phases (Foundation → The agent → Craft).
-- **1a — First read** done (2026-04-23): 11-line REPL that prompts, reads one line, echoes, exits. Three learnings notes distilled from the code review (`05-ownership-and-borrowing`, `06-traits-and-scope`, `07-result-question-mark-unit`).
-- Next: **Checkpoint 1b — Loop forever** (wrap 1a in `loop`; exit on EOF).
+- **1a — First read** done (2026-04-23). Three learnings notes distilled (`05-ownership-and-borrowing`, `06-traits-and-scope`, `07-result-question-mark-unit`).
+- **1b — Loop forever** done (2026-04-23). REPL now loops until EOF (Ctrl-D). No new learnings file — the concepts (`loop`, `break`, EOF detection, buffer allocation vs `.clear()`) were quick discussion, not deep enough to warrant a note.
+- Next: **Checkpoint 1c — Slash commands** (`/exit`, `/help`, else echo).
 
 ## Architecture
 

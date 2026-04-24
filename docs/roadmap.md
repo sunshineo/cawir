@@ -21,7 +21,7 @@ No speculative abstractions — but the target in [`architecture.md`](architectu
 Minimal REPL with `/exit` and `/help`.
 
 - **1a — First read** *(done 2026-04-23)*. Prompt, read one line, echo, exit. *Rust:* `stdin`, `String`, `Result`, `?`, `print!`+`flush`.
-- **1b — Loop forever.** Wrap 1a in `loop`; exit on EOF. *Rust:* `loop`, `break`, EOF detection.
+- **1b — Loop forever** *(done 2026-04-23)*. Wrap 1a in `loop`; exit on EOF. *Rust:* `loop`, `break`, EOF detection.
 - **1c — Slash commands.** `/exit`, `/help`, else echo. *Rust:* `match` on `&str`, `trim`, `starts_with`.
 
 *Deferred:* `Command` trait + `CommandRegistry` → ~CP6-7 (when `/provider` adds arguments and hook-registered commands add a dynamic source). Plugin-loaded commands → post-CP9. Write the 1c match so each arm is one refactor from a registry lookup.
