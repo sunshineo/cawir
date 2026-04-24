@@ -56,6 +56,22 @@ Recognize `/exit` (quit) and `/help` (print the command list). Anything else ech
 - *New Rust:* `match` on `&str`, `str::trim`, `str::starts_with`, the difference between `String` (owned) and `&str` (borrowed) when comparing.
 - *Done when:* `/exit` quits cleanly; `/help` prints a two-line command list; anything else echoes.
 
+#### Heads up — the CommandRegistry comes later
+
+With only `/exit` and `/help`, a hardcoded `match` on strings is the right solution. Rule of Three isn't met; speculation would pick a wrong abstraction. The `Command` trait + `CommandRegistry` (multi-source: built-in, settings-loaded, plugin-loaded) emerges later — most likely around Checkpoint 6 (when `/provider <name>` introduces the first command with an argument) or Checkpoint 7 (when hook-configured commands add the first dynamic source). Plugin-loaded slash commands are further out and currently speculative.
+
+Write the 1c match in a shape that's one refactor from a registry lookup:
+
+```rust
+match trimmed {
+    "/exit" => break,
+    "/help" => print_help(),
+    other   => println!("you said: {}", other),
+}
+```
+
+Each arm corresponds to what will later be a registry entry. Extracting `CommandRegistry` = moving the arms into a `HashMap<&str, Box<dyn Command>>` and adding an argument type. No restructuring needed.
+
 **Architecture components touched.** Surface.
 
 **Final state.** Everything the goal promises — type something, see it echoed, `/exit` quits, `/help` lists commands.
@@ -149,20 +165,50 @@ claude: Added pretty_assertions = "1.4" to [dev-dependencies].
 
 **Rust concepts introduced.**
 
-- **Traits** — our first `trait Tool`. The foundational Rust abstraction.
-- `#[async_trait]` — the crate that lets traits have async methods
-- Trait objects — `Arc<dyn Tool>`, storing heterogeneous tools in one registry
-- `HashMap<String, Arc<dyn Tool>>` — the registry structure
-- `serde_json::Value` — dynamic JSON shapes for tool input schemas
+- **The agent-loop protocol itself** — "while there are tool calls, execute and send results back" — this is the conceptual heart of CP3, not a Rust concept per se but the thing you're actually learning here.
+- `serde_json::Value` — dynamic JSON shapes for tool input
 - `std::fs::read_to_string`, `std::fs::write`
 - `std::process::Command` — for the shell tool
-- A simple inline permission prompt (stdin mid-loop) — will be replaced by proper modes in Checkpoint 4
+- `match` on tool names — dispatch pattern. You know `match` from 1c; this is its first async use.
+- A simple inline approval prompt for mutating tools (`write_file`, `shell`) — hardcoded per-tool, not a formal system.
 
-**Architecture components touched.** Capabilities (Tool trait + tool impls + ToolRegistry), Core engine (agent loop grows a real tool-use branch), Surface (prompt-for-approval UX inline for now).
+Notably NOT introduced at CP3: traits, trait objects, `HashMap`, async trait machinery. See the heads-up below.
+
+**Architecture components touched.** Core engine (agent loop grows a real tool-use branch; tool dispatch is a `match` statement, not yet a registry), Surface (inline prompt-for-approval UX for mutating tools).
 
 **Done when.** You can ask cawir to perform a multi-step task that requires reading files and writing files — and it actually does it. At minimum: *"read Cargo.toml and tell me the dependencies"* works end-to-end without you mediating.
 
-**Watch-out.** Traits are a big concept. If introducing the Tool trait plus three tools plus the loop plus approval UX in one session is too much, split within the checkpoint: get the loop working with just `read_file`, prove it, then add `write_file` and `shell` without touching the loop. Same checkpoint, same artifact at the end.
+**Watch-out.** If introducing three tools + the loop + approval UX in one session is too much, split within the checkpoint: get the loop working with just `read_file`, prove it, then add `write_file` and `shell` without touching the loop. Same checkpoint, same artifact at the end.
+
+#### Heads up — Tool trait, ToolRegistry, and permission modes come later
+
+Intentionally deferred from CP3:
+
+| Deferred thing | Lands at | Why not now |
+|---|---|---|
+| **`Tool` trait + `ToolRegistry`** | Probably around CP6-CP7 (when the `Provider` trait gets extracted and a second reason — plugins/MCP/hook-registered tools — demands dynamic sourcing) | Three concrete tool functions is enough to *see* the shape but not yet enough to *need* a trait. Premature extraction picks the wrong abstraction. Wait for concrete pressure. |
+| **`PermissionMode` enum + `/mode` command** | Checkpoint 4 | The inline `approve?` prompt on `write_file`/`shell` is safe enough for CP3. Formalizing modes is CP4's point. |
+| **Plan mode + `ExitPlanMode` tool** | Checkpoint 4 | Depends on permission modes existing. |
+| **Multi-source tool registration** (plugins, MCP, config-declared) | Post-CP9 speculative | Currently in the "Beyond CP9" list. |
+
+Write CP3's tool dispatch in a shape that's one refactor from a trait-based registry:
+
+```rust
+let result = match tool_call.name.as_str() {
+    "read_file" => tools::read_file(&tool_call.input).await?,
+    "write_file" => {
+        if !approve(&tool_call)? { return denied(); }
+        tools::write_file(&tool_call.input).await?
+    }
+    "shell" => {
+        if !approve(&tool_call)? { return denied(); }
+        tools::shell(&tool_call.input).await?
+    }
+    other => return Err(Error::UnknownTool(other.into())),
+};
+```
+
+Each tool is a plain `async fn(input: serde_json::Value) -> Result<ToolResult>`. When the `Tool` trait lands later, those function signatures become the trait method's signature verbatim — you're lifting them into `impl Tool for ReadFile { async fn execute(...) }`, with the match replaced by `registry.get(name).execute(input)`. The approval check becomes a `PermissionMode::Default` rule in CP4. No restructuring needed.
 
 ---
 
@@ -358,10 +404,10 @@ claude: You asked what the capital of France is.
 |---|---|---|
 | 1 | Echo | `String`/`&str`, `stdin`, `Result`, `?`, `loop`, `match` |
 | 2 | Chat | crates, `async`/`await`, serde derive, `Vec`, structs/enums, modules, `thiserror`, env vars |
-| 3 | Agent loop | **traits**, `#[async_trait]`, trait objects, `HashMap`, `serde_json::Value`, `std::fs`, `Command` |
+| 3 | Agent loop | **the agent-loop protocol**, `serde_json::Value`, `std::fs`, `Command`, `match`-based tool dispatch (Tool trait + registry deferred — see callout) |
 | 4 | Modes | `enum` as state machine, exhaustive match, special tools |
 | 5 | Streaming | `futures::Stream`, `StreamExt`, SSE parsing, partial JSON |
-| 6 | Multi-model | **extracting a trait from two impls**, static vs dynamic dispatch |
+| 6 | Multi-model | **extracting a trait from two impls**, static vs dynamic dispatch. This is also a natural point to revisit extracting the `Tool` trait from CP3's three concrete tool functions (Rule of Three). |
 | 7 | Hooks | `Arc`/`Mutex`, channels, async dispatch, JSON merge |
 | 8 | Polyglot | second orthogonal trait (composition), `keyring`, `dotenvy` |
 | 9 | Resume | serde for disk I/O, `clap`, `directories` |
