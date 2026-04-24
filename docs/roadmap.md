@@ -20,7 +20,7 @@ No speculative abstractions — but the target in [`architecture.md`](architectu
 
 Minimal REPL with `/exit` and `/help`.
 
-- **1a — First read.** Prompt, read one line, echo, exit. *Rust:* `stdin`, `String`, `Result`, `?`, `print!`+`flush`.
+- **1a — First read** *(done 2026-04-23)*. Prompt, read one line, echo, exit. *Rust:* `stdin`, `String`, `Result`, `?`, `print!`+`flush`.
 - **1b — Loop forever.** Wrap 1a in `loop`; exit on EOF. *Rust:* `loop`, `break`, EOF detection.
 - **1c — Slash commands.** `/exit`, `/help`, else echo. *Rust:* `match` on `&str`, `trim`, `starts_with`.
 
