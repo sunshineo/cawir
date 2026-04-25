@@ -1,19 +1,37 @@
 use std::io::{self, Write};
 
+use serde::Deserialize;
+
+#[derive(Deserialize, Debug)]
+struct Repo {
+    full_name: String,
+    description: Option<String>,
+    stargazers_count: u32,
+    open_issues_count: u32,
+    forks_count: u32,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = reqwest::Client::builder()
         .user_agent("cawir/0.1")
         .build()?;
 
-    let zen = client
-        .get("https://api.github.com/zen")
+    let repo: Repo = client
+        .get("https://api.github.com/repos/rust-lang/rust")
         .send()
         .await?
-        .text()
+        .json()
         .await?;
 
-    println!("github says: {}", zen.trim());
+    println!("{}", repo.full_name);
+    match &repo.description {
+        Some(desc) => println!("  {}", desc),
+        None => println!("  (no description)"),
+    }
+    println!("  stars:  {}", repo.stargazers_count);
+    println!("  issues: {}", repo.open_issues_count);
+    println!("  forks:  {}", repo.forks_count);
     println!();
 
     loop {

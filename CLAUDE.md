@@ -51,9 +51,10 @@ Every implementation step is a teaching opportunity. The trail of `learnings/` f
 - [Roadmap](docs/roadmap.md) committed — 9 named checkpoints across three phases (Foundation → The agent → Craft).
 - **Checkpoint 1 (Echo) done** (2026-04-23): 1a, 1b, 1c. REPL loops, handles `/exit`, `/help`, rejects unknown `/commands`, echoes everything else.
 - **2a-i — Async entry point** done (2026-04-24). First crate added (`tokio`); main is now `#[tokio::main] async fn`.
-- **2a-ii — First HTTP call** done (2026-04-24). Second crate added (`reqwest`). cawir fetches a GitHub Zen quote on startup; first real `.await` on a network call. Main return type is now `Result<(), Box<dyn Error>>`.
-- Six learnings notes from the journey so far: `05-ownership-and-borrowing`, `06-traits-and-scope`, `07-result-question-mark-unit`, `08-match-patterns-and-bindings`, `09-async-tokio-and-runtime`, `10-rust-async-vs-other-languages`.
-- Next: **2b — Parse JSON** (fetch a JSON endpoint, deserialize into a struct).
+- **2a-ii — First HTTP call** done (2026-04-24). Second crate added (`reqwest`). First `.await` on a network call. Main return type is now `Result<(), Box<dyn Error>>`.
+- **2b — Parse JSON** done (2026-04-24). Third crate added (`serde`). cawir fetches `api.github.com/repos/rust-lang/rust`, deserializes into a `Repo` struct via `#[derive(Deserialize)]`, prints name / description / stars / issues / forks.
+- Eight learnings notes from the journey so far: `05-ownership-and-borrowing`, `06-traits-and-scope`, `07-result-question-mark-unit`, `08-match-patterns-and-bindings`, `09-async-tokio-and-runtime`, `10-rust-async-vs-other-languages`, `11-derive-macros`, `12-serde-deserialization`.
+- Next: **2c — First Claude call** (hard-coded "hello" POST to Anthropic; introduces `#[derive(Serialize)]`, custom headers, `std::env::var` for `ANTHROPIC_API_KEY`).
 
 ## Architecture
 
