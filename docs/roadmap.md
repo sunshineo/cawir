@@ -6,6 +6,14 @@ Build a working coding agent **and** learn Rust — equal goals. Each checkpoint
 
 No speculative abstractions — but the target in [`architecture.md`](architecture.md) tells us where things land when Rule of Three pressure shows up.
 
+## Deliberate simplifications
+
+Some sub-steps use simpler-than-final patterns so the Rust concept of the moment can land cleanly. Each has a planned fix point. Worth knowing up front so the rough edges don't feel like permanent design choices.
+
+- **Fail-fast error handling** (2a–2c). Every fallible call uses `?` and propagates up to `main`. Any failure exits the program. Right for a learning prototype; wrong for a shipped CLI. Per-call graceful recovery lands at **2d (Wire with REPL)** when each user line becomes a Claude call and a single bad response shouldn't end the session. Richer typed error variants land at **2f (Cleanup)** with `thiserror`. Background: `learnings/13-error-handling-fail-fast-vs-graceful.md`.
+- **`Box<dyn Error>` as a catch-all** (2a-ii–2e). A pragmatic stepping stone that lets `?` propagate any error type. Replaced by a proper `thiserror` enum at **2f**.
+- **`ContentBlock` as a struct, not a tagged enum** (2c–2e). Only handles text blocks; will fail to deserialize tool_use blocks. Grows into a `#[serde(tag = "type")]` enum at **CP3 (Agent loop)** when tool use lands.
+
 ## Three phases, nine checkpoints
 
 | Phase | Checkpoints |
@@ -42,7 +50,8 @@ Multi-turn conversation with Claude. Biggest Rust jump — seven sub-steps.
     - *Iterates into:* The GitHub Zen demo call gets removed when the first Claude call lands at 2c — replaced, not extended. The `reqwest::Client::builder()` pattern stays (we'll set `Authorization` and other headers the same way for Anthropic). `Box<dyn Error>` persists as a pragmatic stepping stone until 2f, where a `thiserror` enum takes over.
 - **2b — Parse JSON** *(done 2026-04-24)*. Fetch `https://api.github.com/repos/rust-lang/rust`, deserialize into a `Repo` struct via `#[derive(Deserialize)]`, print selected fields (name, description, stars, issues, forks). *Rust:* `#[derive(Deserialize)]` with `serde`, `reqwest::Response::json().await?`, `Option<T>` for nullable JSON fields.
     - *Iterates into:* The GitHub repo demo is replaced at 2c when Claude API request/response types take over. The `#[derive(Deserialize)]` pattern persists — reused in every checkpoint from 2c onward, and again at CP5 for stream events (smaller enum variants tagged by a `type` field, one per SSE event, instead of one big response struct).
-- **2c — First Claude call.** Hard-coded "hello" POST. *Rust:* `#[derive(Serialize)]`, custom headers, `std::env::var`.
+- **2c — First Claude call** *(done 2026-04-25)*. Hard-coded "hello" POST. cawir reads `ANTHROPIC_API_KEY` from env, builds a `MessageRequest` with the Claude model + a single user `Message`, sends it with `x-api-key` / `anthropic-version` / `content-type` headers, parses the response into `MessageResponse` with `Vec<ContentBlock>`, prints the first block's text. Status check before parsing so 401s give a clear error message instead of a confusing serde failure. *Rust:* `#[derive(Serialize)]`, custom HTTP headers, `std::env::var`, `if let Some(...)`, status-then-body error handling.
+    - *Iterates into:* The hard-coded "hello" prompt is replaced by user input at **2d (Wire with REPL)**, where each line becomes a Claude call and `?`-everywhere fail-fast becomes per-call match. Single-shot becomes multi-turn at **2e** with `Vec<Message>` accumulating across turns. The simple `ContentBlock { text: String }` grows into a `#[serde(tag = "type")]` enum at **CP3 (Agent loop)** to also handle tool_use blocks. `Box<dyn Error>` becomes a `thiserror` enum at **2f**.
 - **2d — Wire with REPL.** User input → Claude → print. Single-turn. *Rust:* combining sync loop with async.
 - **2e — Multi-turn.** `Vec<Message>` across turns. *Rust:* `Vec`, struct/enum variant data.
 - **2f — Cleanup.** `main.rs` + `lib.rs` + `session.rs` + `error.rs`; `thiserror`. *Rust:* `mod`, `pub`, `use`, `#[derive(thiserror::Error)]`, `#[from]`.

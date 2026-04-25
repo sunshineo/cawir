@@ -1,37 +1,68 @@
 use std::io::{self, Write};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize)]
+struct MessageRequest {
+    model: String,
+    max_tokens: u32,
+    messages: Vec<Message>,
+}
+
+#[derive(Serialize)]
+struct Message {
+    role: String,
+    content: String,
+}
 
 #[derive(Deserialize, Debug)]
-struct Repo {
-    full_name: String,
-    description: Option<String>,
-    stargazers_count: u32,
-    open_issues_count: u32,
-    forks_count: u32,
+struct MessageResponse {
+    content: Vec<ContentBlock>,
+}
+
+#[derive(Deserialize, Debug)]
+struct ContentBlock {
+    text: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .map_err(|_| "ANTHROPIC_API_KEY env var not set. Get one from console.anthropic.com.")?;
+
     let client = reqwest::Client::builder()
         .user_agent("cawir/0.1")
         .build()?;
 
-    let repo: Repo = client
-        .get("https://api.github.com/repos/rust-lang/rust")
+    let req = MessageRequest {
+        model: "claude-haiku-4-5-20251001".to_string(),
+        max_tokens: 1024,
+        messages: vec![Message {
+            role: "user".to_string(),
+            content: "hello".to_string(),
+        }],
+    };
+
+    let response = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", &api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&req)
         .send()
-        .await?
-        .json()
         .await?;
 
-    println!("{}", repo.full_name);
-    match &repo.description {
-        Some(desc) => println!("  {}", desc),
-        None => println!("  (no description)"),
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await?;
+        return Err(format!("anthropic api error {}: {}", status, body).into());
     }
-    println!("  stars:  {}", repo.stargazers_count);
-    println!("  issues: {}", repo.open_issues_count);
-    println!("  forks:  {}", repo.forks_count);
+
+    let parsed: MessageResponse = response.json().await?;
+
+    if let Some(first) = parsed.content.first() {
+        println!("claude: {}", first.text);
+    }
     println!();
 
     loop {
