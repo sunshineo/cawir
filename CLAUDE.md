@@ -53,9 +53,10 @@ Every implementation step is a teaching opportunity. The trail of `learnings/` f
 - **2a-i — Async entry point** done (2026-04-24). First crate added (`tokio`); main is now `#[tokio::main] async fn`.
 - **2a-ii — First HTTP call** done (2026-04-24). Second crate added (`reqwest`). First `.await` on a network call. Main return type is now `Result<(), Box<dyn Error>>`.
 - **2b — Parse JSON** done (2026-04-24). Third crate added (`serde`). cawir fetches `api.github.com/repos/rust-lang/rust`, deserializes into a `Repo` struct via `#[derive(Deserialize)]`, prints name / description / stars / issues / forks.
-- **2c — First Claude call** done (2026-04-25). Hard-coded "hello" POST to Anthropic; reads `ANTHROPIC_API_KEY` from env. First real Claude reply printed.
-- Nine learnings notes so far: `05-ownership-and-borrowing`, `06-traits-and-scope`, `07-result-question-mark-unit`, `08-match-patterns-and-bindings`, `09-async-tokio-and-runtime`, `10-rust-async-vs-other-languages`, `11-derive-macros`, `12-serde-deserialization`, `13-error-handling-fail-fast-vs-graceful`.
-- Next: **2d — Wire with REPL** (replace the hard-coded "hello" with user input from the REPL; switch the Claude-call site from `?`-fail-fast to per-call `match` so a single bad response doesn't end the session).
+- **2c — First Claude call** done (2026-04-25). Hard-coded "hello" POST to Anthropic; reads `ANTHROPIC_API_KEY` from env.
+- **2d — Wire with REPL** done (2026-04-27). REPL now sends each non-`/command` line to Claude (single-turn, no history). Claude call extracted into `ask_claude`; per-call match means a single bad response doesn't end the session.
+- Ten learnings notes so far: `05-ownership-and-borrowing`, `06-traits-and-scope`, `07-result-question-mark-unit`, `08-match-patterns-and-bindings`, `09-async-tokio-and-runtime`, `10-rust-async-vs-other-languages`, `11-derive-macros`, `12-serde-deserialization`, `13-error-handling-fail-fast-vs-graceful`, `14-function-parameters-and-ownership`.
+- Next: **2e — Multi-turn** (maintain `Vec<Message>` across loop iterations so Claude remembers earlier turns).
 
 ## Architecture
 
