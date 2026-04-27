@@ -54,9 +54,10 @@ Every implementation step is a teaching opportunity. The trail of `learnings/` f
 - **2a-ii — First HTTP call** done (2026-04-24). Second crate added (`reqwest`). First `.await` on a network call. Main return type is now `Result<(), Box<dyn Error>>`.
 - **2b — Parse JSON** done (2026-04-24). Third crate added (`serde`). cawir fetches `api.github.com/repos/rust-lang/rust`, deserializes into a `Repo` struct via `#[derive(Deserialize)]`, prints name / description / stars / issues / forks.
 - **2c — First Claude call** done (2026-04-25). Hard-coded "hello" POST to Anthropic; reads `ANTHROPIC_API_KEY` from env.
-- **2d — Wire with REPL** done (2026-04-27). REPL now sends each non-`/command` line to Claude (single-turn, no history). Claude call extracted into `ask_claude`; per-call match means a single bad response doesn't end the session.
-- Ten learnings notes so far: `05-ownership-and-borrowing`, `06-traits-and-scope`, `07-result-question-mark-unit`, `08-match-patterns-and-bindings`, `09-async-tokio-and-runtime`, `10-rust-async-vs-other-languages`, `11-derive-macros`, `12-serde-deserialization`, `13-error-handling-fail-fast-vs-graceful`, `14-function-parameters-and-ownership`.
-- Next: **2e — Multi-turn** (maintain `Vec<Message>` across loop iterations so Claude remembers earlier turns).
+- **2d — Wire with REPL** done (2026-04-27). REPL sends each non-`/command` line to Claude. Per-call match means a single bad response doesn't end the session.
+- **2e — Multi-turn** done (2026-04-27). `history: Vec<Message>` accumulates across turns; full history ships in every call. Claude now remembers earlier turns. Pop-on-error keeps history clean if a call fails.
+- Eleven learnings notes so far: 05–14 plus `15-vec-arrays-and-slices`.
+- Next: **2f — Cleanup** (split `main.rs` into `main.rs` + `lib.rs` + `session.rs` + `error.rs`; replace `Box<dyn Error>` with a `thiserror` enum).
 
 ## Architecture
 

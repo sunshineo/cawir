@@ -2,17 +2,17 @@ use std::io::{self, Write};
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Clone, Debug)]
+struct Message {
+    role: String,
+    content: String,
+}
+
 #[derive(Serialize)]
 struct MessageRequest {
     model: String,
     max_tokens: u32,
     messages: Vec<Message>,
-}
-
-#[derive(Serialize)]
-struct Message {
-    role: String,
-    content: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -34,6 +34,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .user_agent("cawir/0.1")
         .build()?;
 
+    let mut history: Vec<Message> = Vec::new();
+
     loop {
         print!("cawir> ");
         io::stdout().flush()?;
@@ -54,9 +56,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if other.starts_with('/') {
                     println!("unknown command: {}", other);
                 } else {
-                    match ask_claude(&client, &api_key, other).await {
-                        Ok(reply) => println!("claude: {}", reply),
-                        Err(e) => eprintln!("error: {}", e),
+                    history.push(Message {
+                        role: "user".to_string(),
+                        content: other.to_string(),
+                    });
+
+                    match ask_claude(&client, &api_key, &history).await {
+                        Ok(reply) => {
+                            println!("claude: {}", reply);
+                            history.push(Message {
+                                role: "assistant".to_string(),
+                                content: reply,
+                            });
+                        }
+                        Err(e) => {
+                            eprintln!("error: {}", e);
+                            // pop the user message so the next call doesn't
+                            // send two user turns in a row
+                            history.pop();
+                        }
                     }
                 }
             }
@@ -69,15 +87,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn ask_claude(
     client: &reqwest::Client,
     api_key: &str,
-    prompt: &str,
+    messages: &[Message],
 ) -> Result<String, Box<dyn std::error::Error>> {
     let req = MessageRequest {
         model: "claude-haiku-4-5-20251001".to_string(),
         max_tokens: 1024,
-        messages: vec![Message {
-            role: "user".to_string(),
-            content: prompt.to_string(),
-        }],
+        messages: messages.to_vec(),
     };
 
     let response = client
