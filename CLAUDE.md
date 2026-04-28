@@ -43,7 +43,7 @@ For each checkpoint (or sub-step) from [`docs/roadmap.md`](docs/roadmap.md):
 
 Every implementation step is a teaching opportunity. The trail of `learnings/` files is the durable record of what's been learned.
 
-## Current state (as of 2026-04-23)
+## Current state (as of 2026-04-28)
 
 - Toolchain, editor, and provider strategy decided and in place (see Conventions below).
 - `cargo init --bin` scaffold committed; `cargo run` produces "Hello, world!".
@@ -56,8 +56,9 @@ Every implementation step is a teaching opportunity. The trail of `learnings/` f
 - **2c — First Claude call** done (2026-04-25). Hard-coded "hello" POST to Anthropic; reads `ANTHROPIC_API_KEY` from env.
 - **2d — Wire with REPL** done (2026-04-27). REPL sends each non-`/command` line to Claude. Per-call match means a single bad response doesn't end the session.
 - **2e — Multi-turn** done (2026-04-27). `history: Vec<Message>` accumulates across turns; full history ships in every call. Claude now remembers earlier turns. Pop-on-error keeps history clean if a call fails.
-- Eleven learnings notes so far: 05–14 plus `15-vec-arrays-and-slices`.
-- Next: **2f — Cleanup** (split `main.rs` into `main.rs` + `lib.rs` + `session.rs` + `error.rs`; replace `Box<dyn Error>` with a `thiserror` enum).
+- **2f — Cleanup** done (2026-04-28). `main.rs` is now a tiny binary entry point; app code moved to `lib.rs`; `Message` moved to `session.rs`; typed errors live in `error.rs` using `thiserror`; `Box<dyn Error>` was replaced by `cawir::Result<T>`. `AGENTS.md` now symlinks to this file so Codex and Claude share the same project instructions.
+- Fourteen learnings notes so far: 05–15 plus `16-modules-lib-and-public-api`, `17-thiserror-from-and-question-mark`, and `18-prelude-debug-and-hidden-imports`.
+- Next: **3 — Agent loop** (read/write/shell tools in a dispatch/execute/feedback cycle).
 
 ## Architecture
 
