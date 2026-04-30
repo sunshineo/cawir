@@ -94,8 +94,13 @@ pub async fn run() -> Result<()> {
                             });
                         }
                         Ok(ClaudeResponse::ToolUse(blocks)) => {
-                            print_tool_use_response(&blocks);
-                            println!("tool use is not implemented yet. exiting.");
+                            if let Err(e) = handle_tool_use_response(&blocks) {
+                                eprintln!("error: {}", e);
+                            }
+
+                            // 3c can execute one tool locally, but the turn is still incomplete
+                            // until 3d sends a tool_result back to Claude.
+                            history.pop();
                             break;
                         }
                         Err(e) => {
@@ -184,26 +189,47 @@ fn render_text_blocks(blocks: &[ContentBlock]) -> String {
         .join("\n")
 }
 
-fn print_tool_use_response(blocks: &[ContentBlock]) {
-    println!("claude response blocks:");
-    for (index, block) in blocks.iter().enumerate() {
+fn handle_tool_use_response(blocks: &[ContentBlock]) -> Result<()> {
+    for block in blocks {
         match block {
             ContentBlock::Text { text } => {
-                println!("  {}. text: {}", index + 1, text);
+                println!("claude: {}", text);
             }
             ContentBlock::ToolUse { id, name, input } => {
-                println!("  {}. tool_use:", index + 1);
-                println!("     id: {}", id);
-                println!("     name: {}", name);
-
-                let pretty_input =
-                    serde_json::to_string_pretty(input).expect("tool input should serialize");
-                println!("     input:");
-                for line in pretty_input.lines() {
-                    println!("       {}", line);
-                }
+                println!("tool request: {} ({})", name, id);
+                let result = execute_tool_call(name, input)?;
+                print_tool_result(name, &result);
             }
         }
+    }
+
+    Ok(())
+}
+
+fn execute_tool_call(name: &str, input: &Value) -> Result<String> {
+    match name {
+        "read_file" => execute_read_file(input),
+        _ => Err(Error::UnknownTool(name.to_string())),
+    }
+}
+
+fn execute_read_file(input: &Value) -> Result<String> {
+    let path = input
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::ToolInput {
+            tool: "read_file".to_string(),
+            message: "expected input.path to be a string".to_string(),
+        })?;
+
+    Ok(std::fs::read_to_string(path)?)
+}
+
+fn print_tool_result(name: &str, result: &str) {
+    println!("tool result from {}:", name);
+    print!("{}", result);
+    if !result.ends_with('\n') {
+        println!();
     }
 }
 
@@ -215,6 +241,7 @@ fn print_help() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn parses_tool_use_blocks_from_anthropic_response() {
@@ -282,5 +309,40 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(ordered_kinds, vec!["text", "tool_use", "text"]);
+    }
+
+    #[test]
+    fn executes_read_file_tool_call() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "cawir-read-file-test-{}-{}.txt",
+            std::process::id(),
+            unique
+        ));
+
+        std::fs::write(&path, "tokio = \"1\"\nserde = \"1\"\n").unwrap();
+
+        let input = json!({ "path": path.to_string_lossy() });
+        let result = execute_tool_call("read_file", &input).unwrap();
+
+        assert_eq!(result, "tokio = \"1\"\nserde = \"1\"\n");
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn read_file_requires_a_string_path() {
+        let error = execute_tool_call("read_file", &json!({})).unwrap_err();
+
+        match error {
+            Error::ToolInput { tool, message } => {
+                assert_eq!(tool, "read_file");
+                assert_eq!(message, "expected input.path to be a string");
+            }
+            other => panic!("expected tool input error, got {:?}", other),
+        }
     }
 }

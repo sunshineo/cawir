@@ -10,7 +10,7 @@ This document tracks the current implementation state and recent progress.
 
 - Current focus: **Checkpoint 3 — Agent loop**.
 - Next sub-step: **3d — Send one tool result back**.
-- Working tree note: **3c — Execute one read-only tool call** is implemented locally and under review, but not committed yet.
+- Latest completed sub-step: **3c — Execute one read-only tool call**.
 - Current user-visible behavior: if Claude emits `read_file`, cawir prints the raw file contents and then stops the REPL. The turn cannot continue until `3d` sends a `tool_result` back to Claude.
 
 ## Completed checkpoints
@@ -33,9 +33,9 @@ This document tracks the current implementation state and recent progress.
 
 - `3a` completed on 2026-04-29. `read_file` is advertised in the Anthropic request.
 - `3b` completed on 2026-04-29. `ContentBlock` is now a tagged enum that can parse `tool_use`.
-- `3c` is implemented locally on 2026-04-30 and under review. `read_file` executes, prints raw output, and stops the REPL until `3d` exists.
+- `3c` completed on 2026-04-30. `read_file` executes, prints raw output, and stops the REPL until `3d` exists.
 
 ## Learnings
 
-- `learnings/` currently includes notes `01` through `19`.
+- `learnings/` currently includes notes `01` through `20`.
 - New Rust discussions should be distilled into `learnings/*.md` before commit, not left only in chat history.

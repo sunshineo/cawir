@@ -19,6 +19,12 @@ pub enum Error {
 
     #[error("anthropic returned empty content")]
     EmptyContent,
+
+    #[error("unknown tool requested: {0}")]
+    UnknownTool(String),
+
+    #[error("invalid input for tool {tool}: {message}")]
+    ToolInput { tool: String, message: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
