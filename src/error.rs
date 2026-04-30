@@ -25,6 +25,9 @@ pub enum Error {
 
     #[error("invalid input for tool {tool}: {message}")]
     ToolInput { tool: String, message: String },
+
+    #[error("claude requested another tool; checkpoint 3f will add the repeat loop")]
+    ToolLoopNotReady,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

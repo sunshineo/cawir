@@ -156,6 +156,8 @@ Tool definitions go via the provider's dedicated `tools:` API channel, **not** i
 
 **Session** — the data the agent loop mutates. See [Session as pure data](#session-as-pure-data) below for the full type definition and rationale.
 
+**Current module ownership during early checkpoints.** Until the target modules are extracted, `session.rs` owns durable serde conversation data: `Message` and `MessageContent`. These are the types that can live in `history` and later be serialized for `/resume`. `lib.rs` still owns the current REPL orchestration, Anthropic HTTP call, and temporary request/response structs such as `MessageRequest`, `MessageResponse`, and `ClaudeResponse`. Those are runtime/wire/control-flow details, not durable session data. When provider extraction happens, Anthropic-specific request/response structs move out of `lib.rs`; session data stays provider-neutral unless real multi-provider pressure forces a schema change.
+
 ### 3. Capabilities
 
 Two registries for things the agent can invoke. Both follow the same pattern: a trait + a registry + multiple population sources.
@@ -388,7 +390,7 @@ src/
 │   └── shell.rs         (later)
 ├── permission.rs        PermissionMode + Validation types
 ├── hook.rs              HookRegistry, HookHandler trait, handler impls
-├── session.rs           Session, Message, ContentBlock, SessionId — serde types
+├── session.rs           Session, Message, MessageContent, SessionId — serde types
 ├── prompt.rs            SystemPrompt, PromptSection, assembly logic
 ├── settings.rs          SettingsResolver (user / project / local merge)
 ├── config.rs            Config struct (persisted across sessions)
