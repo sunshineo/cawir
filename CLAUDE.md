@@ -9,6 +9,13 @@ A minimal coding agent, written in Rust, built incrementally as a learning vehic
 
 The target is *not* to compete with Claude Code or Cursor. The target is a small, readable agent the author fully understands.
 
+## Project docs
+
+- [`docs/status.md`](docs/status.md) tracks the current implementation state and what is next.
+- [`docs/roadmap.md`](docs/roadmap.md) defines the checkpoint sequence and scope.
+- [`docs/architecture.md`](docs/architecture.md) describes the target component design and extension seams.
+- `learnings/*.md` stores durable Rust notes organized by topic.
+
 ## How to collaborate on this project
 
 ### Teach as you go
@@ -22,9 +29,9 @@ The author does not know Rust. When you write or review code here:
 
 ### Grow the codebase organically
 
-Do not implement the architecture all at once. The [target architecture](docs/architecture.md) is known — 10 layers, typed event bus, serializable sessions, provider/auth split — but each version ships with only the minimum that works. v0.1 is probably ~100 lines with no trait abstraction yet. Each subsequent version extracts one more layer from the target, informed by concrete code, not by planning ahead.
+Do not implement the architecture all at once. The [target architecture](docs/architecture.md) is known — five functional groups, typed event bus, serializable sessions, provider/auth split — but each checkpoint ships with only the minimum that works. The first version is probably ~100 lines with no trait abstraction yet. Each subsequent checkpoint extracts one more component from the target, informed by concrete code, not by planning ahead.
 
-The discipline: **no speculative abstractions, but the target shape is known.** That's the difference between "grown organically" and "improvised." When we defer a `Provider` trait at v0.1, we know where it will live when we extract it from two concrete impls at v0.6 — we're not guessing.
+The discipline: **no speculative abstractions, but the target shape is known.** That's the difference between "grown organically" and "improvised." When we defer a `Provider` trait while there is still only one provider, we still know where it will live once a second concrete implementation creates real extraction pressure — we're not guessing.
 
 ### Code style
 
@@ -43,53 +50,6 @@ For each checkpoint (or sub-step) from [`docs/roadmap.md`](docs/roadmap.md):
 
 Every implementation step is a teaching opportunity. The trail of `learnings/` files is the durable record of what's been learned.
 
-## Current state (as of 2026-04-28)
-
-- Toolchain, editor, and provider strategy decided and in place (see Conventions below).
-- `cargo init --bin` scaffold committed; `cargo run` produces "Hello, world!".
-- [Target architecture](docs/architecture.md) committed — 5-component-group design.
-- [Roadmap](docs/roadmap.md) committed — 9 named checkpoints across three phases (Foundation → The agent → Craft).
-- **Checkpoint 1 (Echo) done** (2026-04-23): 1a, 1b, 1c. REPL loops, handles `/exit`, `/help`, rejects unknown `/commands`, echoes everything else.
-- **2a-i — Async entry point** done (2026-04-24). First crate added (`tokio`); main is now `#[tokio::main] async fn`.
-- **2a-ii — First HTTP call** done (2026-04-24). Second crate added (`reqwest`). First `.await` on a network call. Main return type is now `Result<(), Box<dyn Error>>`.
-- **2b — Parse JSON** done (2026-04-24). Third crate added (`serde`). cawir fetches `api.github.com/repos/rust-lang/rust`, deserializes into a `Repo` struct via `#[derive(Deserialize)]`, prints name / description / stars / issues / forks.
-- **2c — First Claude call** done (2026-04-25). Hard-coded "hello" POST to Anthropic; reads `ANTHROPIC_API_KEY` from env.
-- **2d — Wire with REPL** done (2026-04-27). REPL sends each non-`/command` line to Claude. Per-call match means a single bad response doesn't end the session.
-- **2e — Multi-turn** done (2026-04-27). `history: Vec<Message>` accumulates across turns; full history ships in every call. Claude now remembers earlier turns. Pop-on-error keeps history clean if a call fails.
-- **2f — Cleanup** done (2026-04-28). `main.rs` is now a tiny binary entry point; app code moved to `lib.rs`; `Message` moved to `session.rs`; typed errors live in `error.rs` using `thiserror`; `Box<dyn Error>` was replaced by `cawir::Result<T>`. `AGENTS.md` now symlinks to this file so Codex and Claude share the same project instructions.
-- Fourteen learnings notes so far: 05–15 plus `16-modules-lib-and-public-api`, `17-thiserror-from-and-question-mark`, and `18-prelude-debug-and-hidden-imports`.
-- Next: **3 — Agent loop** (read/write/shell tools in a dispatch/execute/feedback cycle).
-
-## Architecture
-
-cawir is a **component graph** centered on the agent loop, organized into five functional groups: **Surface** (REPL + slash commands), **Core engine** (agent loop + session + prompt + event dispatch), **Capabilities** (tool registry, hook registry), **Policy** (permission modes + validators), and **External** (provider, auth, credential chain, settings resolver). It is not a layered stack — the agent loop at the center fans out to multiple components; the REPL consumes agent events alongside parsing slash commands locally.
-
-Properties locked in from v0.1:
-
-- **Async + streaming loop.** `agent::run` returns a `Stream<AgentEvent>`; the REPL consumes it.
-- **Typed lifecycle events.** `AgentEvent` enum (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, …) dispatched synchronously to hooks (who can modify/deny) and asynchronously into the REPL stream (observation only).
-- **Self-describing tools.** Each tool is a `Tool` trait impl declaring name, JSON schema, description, and execution logic.
-- **Permission = mode + per-tool validator + PreToolUse hook.** Modes: `Default`, `Plan`, `AcceptEdits`, `Bypass`.
-- **Provider ⊥ Auth.** Separate traits. Each provider declares which auth methods it accepts.
-- **Session is pure data.** `Session` derives `Serialize`/`Deserialize` from v0.1; `/resume` later becomes an implementation, not a schema migration.
-- **One `SettingsResolver`.** User → project → local merge, used everywhere config is read.
-
-Full detail — the component flow diagram, each group's types/traits, extension seams, target module layout, and the 10 commit-level decisions — lives in [`docs/architecture.md`](docs/architecture.md).
-
-Design influences: we studied Claude Code's community deep-dive docs and source to borrow its component decomposition, explicitly skipping complexity that's about Anthropic's production scale (Bash AST parsing, LLM permission classifiers, multi-layer compaction) rather than about what a coding agent fundamentally is.
-
-## Roadmap
-
-[`docs/roadmap.md`](docs/roadmap.md) sequences the work into nine named checkpoints across three phases:
-
-1. **Echo** · 2. **Chat** — *Foundation: not yet an agent*
-3. **Agent loop** ⭐ · 4. **Modes** — *The agent: the heart of the project*
-5. **Streaming** · 6. **Multi-model** · 7. **Hooks** · 8. **Polyglot** · 9. **Resume** — *Craft: making it good*
-
-Each checkpoint pairs a user-visible capability with 1–3 new Rust concepts. Checkpoint 3 ("Agent loop") is the moment cawir becomes a real coding agent — read + write + shell tools in the dispatch/execute/feedback cycle that defines every coding-agent product.
-
-The roadmap is a living document — checkpoints will split, merge, and reorder as we actually implement.
-
 ## Conventions
 
 ### Toolchain (decided 2026-04-23)
@@ -97,7 +57,6 @@ The roadmap is a living document — checkpoints will split, merge, and reorder 
 - **Installer:** `rustup` (official), installed via `curl https://sh.rustup.rs | sh`. Not Homebrew.
 - **Channel:** `stable`. No `rust-toolchain.toml` pin yet — add one only when we hit a reason.
 - **Profile:** `default` — ships `rustc`, `cargo`, `rust-std`, `rust-docs`, `rustfmt`, `clippy`. Use all four tools from day one.
-- **Current version:** Rust 1.95.0 stable (as of install). `rustup update` refreshes it.
 - **PATH:** `~/.cargo/bin` added via `~/.zshenv` (not `~/.zshrc`) so non-interactive shells/cron/launchd/subprocesses also see cargo.
 - **Linter policy:** run `cargo clippy` regularly while learning — its suggestions are one of the best free Rust tutors. `cargo fmt` before committing.
 
@@ -107,7 +66,6 @@ The roadmap is a living document — checkpoints will split, merge, and reorder 
 - **LSP:** `rust-analyzer` VS Code extension (publisher: *The Rust Programming Language*, id `rust-lang.rust-analyzer`). Extension auto-downloads the rust-analyzer binary on first `.rs` file open. Do **not** install the deprecated `rust-lang.rust` (RLS-based) extension.
 - **Debugger:** `CodeLLDB` extension (id `vadimcn.vscode-lldb`). Wraps LLDB via DAP. Understands Rust pretty-printers (`Vec`, `Option`, `Result`).
 - **Editor config in repo:** not committed. Solo learning project — keep the repo clean. Revisit if collaboration starts.
-- **Verified 2026-04-23:** rust-analyzer binary downloaded (v0.3.2870-standalone), inlay hints render, hover docs work, error diagnostics + quick-fix suggestions work. CodeLLDB installed but not yet exercised — will be tested when cawir has code worth stepping through.
 
 ### Model provider & API shape (decided 2026-04-23)
 
@@ -150,4 +108,4 @@ Each provider declares which auth methods it accepts. Matrix:
 - **Async runtime:** `tokio`.
 - **Serde discipline:** every type in `Session` derives `Serialize`/`Deserialize` from v0.1 (even before `/resume` ships).
 
-Update this file as new conventions emerge — don't document guesses.
+Update this file when collaboration rules or durable project conventions change. Put day-to-day progress in `docs/status.md`, not here.

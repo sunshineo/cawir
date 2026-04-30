@@ -4,7 +4,9 @@
 
 cawir is a minimal, hand-rolled CLI coding agent in Rust. It is **BYO-model** — the user supplies credentials for whichever provider they want to use (Anthropic, OpenAI, Ollama). The project is a learning vehicle for Rust and agent internals, not a Claude Code competitor.
 
-This document describes the **target architecture** — the shape the codebase is growing toward. Early versions (v0.1, v0.2) implement only subsets; each version extracts one more component from what follows, informed by concrete code rather than planning ahead. The point of documenting the target is not to build it all upfront, but to know what a speculation would look like when we decide *not* to abstract something yet.
+This document describes the **target architecture** — the shape the codebase is growing toward. Early checkpoints implement only subsets; each checkpoint extracts one more component from what follows, informed by concrete code rather than planning ahead. The point of documenting the target is not to build it all upfront, but to know what a speculation would look like when we decide *not* to abstract something yet.
+
+Current implementation state lives in [`status.md`](status.md). Checkpoint sequence lives in [`roadmap.md`](roadmap.md).
 
 ## Influences
 
@@ -193,11 +195,11 @@ pub trait HookHandler: Send + Sync {
 
 Handler flavors:
 
-- **Command** — runs a shell command; event JSON goes on stdin; the handler reads `HookAction` from exit code + stdout. v1 supports this.
-- **Prompt** — LLM-based semantic evaluation. v2+.
-- **Agent** — full sub-loop invocation. v2+.
+- **Command** — runs a shell command; event JSON goes on stdin; the handler reads `HookAction` from exit code + stdout.
+- **Prompt** — LLM-based semantic evaluation.
+- **Agent** — full sub-loop invocation.
 
-The `HookRegistry` is a dispatch table: `event_kind → Vec<Arc<dyn HookHandler>>`. Populated at startup from `settings.json` (via the settings resolver) and plugins (later). v0.1 ships no handlers.
+The `HookRegistry` is a dispatch table: `event_kind → Vec<Arc<dyn HookHandler>>`. Populated at startup from `settings.json` (via the settings resolver) and plugins (later). Early versions can ship with no handlers at all.
 
 ### 4. Policy
 
@@ -225,7 +227,7 @@ pub enum Validation {
 3. REPL handles `PlanReady` by rendering the plan and prompting for approval.
 4. On approve, mode switches and the loop resumes.
 
-**Seam — auto-mode classifier.** `PermissionMode::Auto` (v2) backed by an LLM classifier fits the same `mode.check(tool)` interface. The classifier calls out via the `Provider` component without changing anything else.
+**Seam — auto-mode classifier.** `PermissionMode::Auto` backed by an LLM classifier fits the same `mode.check(tool)` interface. The classifier calls out via the `Provider` component without changing anything else.
 
 ### 5. External
 
@@ -306,7 +308,7 @@ pub enum ContentBlock {
 pub struct SessionId(uuid::Uuid);
 ```
 
-### Why serializable from v0.1
+### Why serializable from the start
 
 Adding `#[derive(Serialize, Deserialize)]` later forces a painful refactor — the moment a type holds a `reqwest::Client` or channel handle, it can't derive serde. The discipline is cheap when the code is ~100 lines; it's real work at ~3000 lines.
 
@@ -315,36 +317,36 @@ What this commitment buys:
 - **Clean interior/exterior boundary.** Agent loop takes `&mut Session` (data) and `&Runtime` (handles). Forces the split from day one.
 - **Session ID is first-class.** Available to hooks, logs, and events immediately — not retrofitted at save-time. Avoids the known Claude Code bug where a running session can't see its own ID.
 - **Future `/resume` is ~20 lines:** `read JSON → deserialize → pass to loop`.
-- **Debugging wins immediately:** `dbg!(&session)` and `serde_json::to_string_pretty(&session)` work from v0.1.
+- **Debugging wins immediately:** `dbg!(&session)` and `serde_json::to_string_pretty(&session)` work from the start.
 
 What this commitment does **not** mean:
 
-- v0.1 does not write sessions to disk.
-- v0.1 does not implement `/resume`.
+- cawir does not need to write sessions to disk immediately.
+- cawir does not need to implement `/resume` immediately.
 - Resume does not replay tool side effects — it only continues the conversation.
 
 **Seam — compaction strategies** (micro-compact, full-compact, memory extraction) slot in as `impl CompactionStrategy for X { fn compact(&self, s: &mut Session); }`.
 
 ## Commit-level decisions
 
-These are decisions we commit to from v0.1 — not "grown into."
+These are start-of-project decisions — not things we wait to "grow into."
 
 | # | Decision | Rationale |
 |---|---|---|
 | 1 | Agent loop returns `Stream<AgentEvent>`; REPL consumes it | Sync loop blocks streaming + cancellation |
 | 2 | Each tool is a `Tool` trait impl with name, schema, description, execute | Free functions don't carry schema; no cohesion |
 | 3 | Permission = `PermissionMode` enum + `Tool::validate` method + PreToolUse hooks | Global allow/deny has wrong granularity |
-| 4 | Context = `Session` struct (pure data). No compaction in v1. | Simpler; compaction is last-resort |
+| 4 | Context = `Session` struct (pure data). No compaction in the early versions. | Simpler; compaction is last-resort |
 | 5 | `Provider` and `AuthMethod` are separate traits; providers declare which auths they accept | Single trait couples wire format with auth |
 | 6 | `main.rs` thin; real code in `lib.rs` so tests can reach it | All-in-main is untestable |
-| 7 | Error type = `thiserror` enum from v0.1 | `anyhow` is too opaque for a learning project |
-| 8 | Agent loop emits typed `AgentEvent` values at lifecycle points; hook dispatch runs synchronously before each event flows to the REPL stream. Event enum defined from v0.1. | Retrofitting event emission points later is painful |
-| 9 | `Session` struct derives `Serialize`/`Deserialize` from v0.1, whether we persist it or not | `/resume` later is an implementation, not a schema migration |
+| 7 | Error type = `thiserror` enum from the start | `anyhow` is too opaque for a learning project |
+| 8 | Agent loop emits typed `AgentEvent` values at lifecycle points; hook dispatch runs synchronously before each event flows to the REPL stream. Event enum defined from the start. | Retrofitting event emission points later is painful |
+| 9 | `Session` struct derives `Serialize`/`Deserialize` from the start, whether we persist it or not | `/resume` later is an implementation, not a schema migration |
 | 10 | One `SettingsResolver` handles every config lookup (user → project → local) | Avoids one-off "where do I read this from" decisions everywhere |
 
 ## Extension seams
 
-Things not built in v1 but with a clear place in the architecture:
+Things not built yet but with a clear place in the architecture:
 
 | Future capability | Where it plugs in |
 |---|---|
@@ -397,6 +399,6 @@ Early versions have only a subset of these files. Each roadmap milestone extract
 
 ## Growth approach
 
-v0.1 ships with a few files — a hard-coded Anthropic POST, a minimal REPL, a `Session` struct. Each subsequent version extracts one more component from the target architecture, informed by concrete code. When and in what order we extract each component is a roadmap question, covered separately.
+The first versions ship with only a few files — a hard-coded Anthropic POST, a minimal REPL, a `Session` struct. Each subsequent version extracts one more component from the target architecture, informed by concrete code. When and in what order we extract each component is a roadmap question, covered separately.
 
-The discipline: **no speculative abstractions, but the target shape is known.** We don't build the `Provider` trait in v0.1 because we only have one provider; we do know where it will live when we extract it from two concrete impls at v0.6. That's the difference between "grown organically" and "improvised."
+The discipline: **no speculative abstractions, but the target shape is known.** We don't build the `Provider` trait while there is still only one provider; we do know where it will live when a second provider creates real extraction pressure. That's the difference between "grown organically" and "improvised."
