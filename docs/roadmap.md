@@ -80,14 +80,14 @@ The soul of cawir. cawir stops being "chat with Claude" and becomes a real codin
     - *Iterates into:* This stays concrete and inline beside `read_file`. Together they make the read-only inspection path more useful before any approval system exists, while still keeping dispatch as a plain `match`.
 - **3e — Send one tool result back**. Enrich session or message data enough to store assistant tool-use content and a `tool_result`, then send the `read_file` or `list_files` result back and print Claude's follow-up answer. *Rust:* richer serde enums or structs for conversation state, owned `Vec` data, cloning and ownership across request assembly.
     - *Iterates into:* This is the moment `Message` stops flattening to plain text. The same "session is pure serde data" discipline later pays off at **CP9 (Resume)**.
-- **3f — First mutating tool: write_file with inline approval**. Add `write_file`, but gate it with a direct REPL approval prompt before execution. *Rust:* `std::fs::write`, inline approval flow, distinguishing denial from execution failure.
-    - *Iterates into:* The approval check is intentionally hardcoded here so mutating tools can land safely before the real policy system. `PermissionMode` still starts at **CP4 (Modes)**.
-- **3g — Second mutating tool: shell with inline approval**. Add `shell`, also behind direct approval, and return stdout or stderr into the tool-result path. *Rust:* `std::process::Command`, exit-status handling, stdout or stderr capture.
-    - *Iterates into:* Shell approval remains a local REPL concern in CP3. Finer-grained policy and hook-based vetoes still wait for **CP4** and **CP7**.
-- **3h — Repeat until Claude stops**. Turn the one-shot call-execute-feedback flow into the real agent loop: keep executing tool calls until Claude returns a normal stop. *Rust:* loop control, stop conditions, repeated request or response cycles.
+- **3f — Repeat until Claude stops**. Turn the one-shot call-execute-feedback flow into the real read-only agent loop: keep executing `read_file` and `list_files` calls until Claude returns a normal stop. *Rust:* loop control, stop conditions, repeated request or response cycles.
     - *Iterates into:* The control-flow shape here is the foundation for later streaming and event emission. CP5 and CP7 change how the loop surfaces work, not the fact that the loop owns orchestration.
-- **3i — Tool failures become tool results**. Missing files, denied approvals, and non-zero shell exits are returned to Claude as tool errors instead of crashing or corrupting session history. *Rust:* error-to-data conversion, keeping state consistent after partial failure.
+- **3g — Tool failures become tool results**. Missing files and invalid tool inputs are returned to Claude as tool errors instead of crashing or corrupting session history. *Rust:* error-to-data conversion, keeping state consistent after partial failure.
     - *Iterates into:* CP4 adds policy errors with structure; CP7 adds hook-driven denial. CP3 only needs the simpler rule that a tool failure should stay inside the conversation, not tear down the session.
+- **3h — First mutating tool: write_file with inline approval**. Add `write_file`, but gate it with a direct REPL approval prompt before execution. Denials and write failures flow back through the tool-result path from 3g. *Rust:* `std::fs::write`, inline approval flow, distinguishing denial from execution failure.
+    - *Iterates into:* The approval check is intentionally hardcoded here so mutating tools can land safely before the real policy system. `PermissionMode` still starts at **CP4 (Modes)**.
+- **3i — Second mutating tool: shell with inline approval**. Add `shell`, also behind direct approval, and return stdout, stderr, denial, or execution failure into the tool-result path. *Rust:* `std::process::Command`, exit-status handling, stdout or stderr capture.
+    - *Iterates into:* Shell approval remains a local REPL concern in CP3. Finer-grained policy and hook-based vetoes still wait for **CP4** and **CP7**.
 
 *Deferred:*
 - `Tool` trait + `ToolRegistry` → ~CP6-7 (Rule of Three with concrete pressure)

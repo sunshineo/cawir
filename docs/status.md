@@ -11,6 +11,7 @@ This document tracks the current implementation state and recent progress.
 - Current focus: **Checkpoint 3 — Agent loop**.
 - Next sub-step: **3e — Send one tool result back**.
 - Latest completed sub-step: **3d — Add `list_files` as a second read-only tool**.
+- Planned next order: complete the read-only loop first (`3e`, `3f`, `3g`), then add mutating tools with approval (`3h`, `3i`).
 - Current user-visible behavior: if Claude emits `read_file` or `list_files`, cawir prints the raw output and then stops the REPL. The turn cannot continue until `3e` sends a `tool_result` back to Claude.
 
 ## Completed checkpoints
