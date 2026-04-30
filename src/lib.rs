@@ -98,8 +98,8 @@ pub async fn run() -> Result<()> {
                                 eprintln!("error: {}", e);
                             }
 
-                            // 3c can execute one tool locally, but the turn is still incomplete
-                            // until 3d sends a tool_result back to Claude.
+                            // 3d can execute read-only tools locally, but the turn is still
+                            // incomplete until 3e sends a tool_result back to Claude.
                             history.pop();
                             break;
                         }
@@ -125,7 +125,7 @@ async fn ask_claude(
         model: "claude-haiku-4-5-20251001".to_string(),
         max_tokens: 1024,
         messages: messages.to_vec(),
-        tools: vec![read_file_tool()],
+        tools: vec![list_files_tool(), read_file_tool()],
     };
 
     let response = client
@@ -178,6 +178,24 @@ fn read_file_tool() -> ToolDefinition {
     }
 }
 
+fn list_files_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "list_files".to_string(),
+        description: "List the files and directories inside a folder from the current project. Use this before read_file when you need to discover repository structure or find likely files to inspect. Provide a path relative to the current working directory when possible.".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Directory path to list, preferably relative to the current working directory."
+                }
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }),
+    }
+}
+
 fn render_text_blocks(blocks: &[ContentBlock]) -> String {
     blocks
         .iter()
@@ -208,9 +226,37 @@ fn handle_tool_use_response(blocks: &[ContentBlock]) -> Result<()> {
 
 fn execute_tool_call(name: &str, input: &Value) -> Result<String> {
     match name {
+        "list_files" => execute_list_files(input),
         "read_file" => execute_read_file(input),
         _ => Err(Error::UnknownTool(name.to_string())),
     }
+}
+
+fn execute_list_files(input: &Value) -> Result<String> {
+    let path = input
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::ToolInput {
+            tool: "list_files".to_string(),
+            message: "expected input.path to be a string".to_string(),
+        })?;
+
+    let mut entries = std::fs::read_dir(path)?
+        .map(|entry| -> Result<String> {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            let mut name = entry.file_name().to_string_lossy().into_owned();
+
+            if file_type.is_dir() {
+                name.push('/');
+            }
+
+            Ok(name)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    entries.sort();
+    Ok(entries.join("\n"))
 }
 
 fn execute_read_file(input: &Value) -> Result<String> {
@@ -340,6 +386,43 @@ mod tests {
         match error {
             Error::ToolInput { tool, message } => {
                 assert_eq!(tool, "read_file");
+                assert_eq!(message, "expected input.path to be a string");
+            }
+            other => panic!("expected tool input error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn executes_list_files_tool_call() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "cawir-list-files-test-{}-{}",
+            std::process::id(),
+            unique
+        ));
+
+        std::fs::create_dir(&path).unwrap();
+        std::fs::create_dir(path.join("src")).unwrap();
+        std::fs::write(path.join("Cargo.toml"), "[package]\nname = \"cawir\"\n").unwrap();
+
+        let input = json!({ "path": path.to_string_lossy() });
+        let result = execute_tool_call("list_files", &input).unwrap();
+
+        assert_eq!(result, "Cargo.toml\nsrc/");
+
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn list_files_requires_a_string_path() {
+        let error = execute_tool_call("list_files", &json!({})).unwrap_err();
+
+        match error {
+            Error::ToolInput { tool, message } => {
+                assert_eq!(tool, "list_files");
                 assert_eq!(message, "expected input.path to be a string");
             }
             other => panic!("expected tool input error, got {:?}", other),
