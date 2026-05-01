@@ -8,10 +8,10 @@ This document tracks the current implementation state and recent progress.
 
 ## Snapshot (as of 2026-05-01)
 
-- Current focus: **Checkpoint 4 — Modes**.
-- Next sub-step: start Checkpoint 4 by adding a concrete `PermissionMode` enum and `/mode` command.
+- Current focus: **Checkpoint 3.5 — Refactor shape**.
+- Next sub-step: **3.5a — Move Anthropic API code to `anthropic.rs`**.
 - Latest completed sub-step: **3i — Second mutating tool: shell with inline approval**.
-- Planned next order: move into Checkpoint 4 permission modes.
+- Planned next order: split `lib.rs` incrementally through `3.5a-d`, then move into Checkpoint 4 permission modes.
 - Current user-visible behavior: one user prompt can trigger repeated `read_file`, `list_files`, approval-gated `write_file`, and approval-gated `shell` calls. cawir executes each tool request, sends matching `tool_result` blocks back to Claude, and continues until Claude returns a text answer or the 42-round tool-loop cap is reached. Tool execution failures and denied mutating actions are returned to Claude as error `tool_result` blocks instead of aborting the turn.
 
 ## Completed checkpoints

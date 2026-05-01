@@ -22,7 +22,7 @@ Some sub-steps use simpler-than-final patterns so the Rust concept of the moment
 | Phase | Checkpoints |
 |---|---|
 | Foundation — not yet an agent | 1. Echo · 2. Chat |
-| The agent | 3. Agent loop ⭐ · 4. Modes |
+| The agent | 3. Agent loop ⭐ · 3.5. Refactor shape · 4. Modes |
 | Craft | 5. Streaming · 6. Multi-model · 7. Hooks · 8. Polyglot · 9. Resume |
 
 ---
@@ -103,6 +103,47 @@ Write dispatch so each arm is already the future trait method's signature.
 Done when: "read Cargo.toml and tell me the deps" works end-to-end; approved writes and shell commands work; one user prompt can trigger multiple tool calls; and tool failures stay inside the conversation instead of killing the session.
 
 Components: Core engine, Surface.
+
+---
+
+## 3.5 — Refactor shape
+
+Checkpoint 3 made cawir a real agent, but `lib.rs` now owns too many responsibilities: Anthropic HTTP, tool definitions, tool execution, approval prompts, the agent loop, slash commands, and most tests. Before adding permission modes, split the code by responsibility while preserving behavior.
+
+This is an organizational checkpoint, not an abstraction checkpoint. The goal is clearer modules, not a provider trait, tool trait, command registry, plugin system, or config system.
+
+- **3.5a — Move Anthropic API code to `anthropic.rs`**. Move request/response structs and the concrete `ask_claude` call out of `lib.rs`. Keep the implementation Anthropic-specific. *Rust:* `pub(crate)` visibility, module imports, separating wire protocol code from orchestration.
+    - *Iterates into:* A future `Provider` trait still waits until CP6 when OpenAI adds real extraction pressure. This step only gives the concrete Anthropic code a home.
+- **3.5b — Move tools to `tools.rs`**. Move tool schemas, tool dispatch, tool execution, approval prompts, and tool tests out of `lib.rs`. Add a small concrete `definitions() -> Vec<ToolDefinition>` and `execute_tool_uses(...)` surface, but keep dispatch as a plain `match`. *Rust:* private helpers inside a module, public module functions, tests living beside the code they exercise.
+    - *Iterates into:* A `Tool` trait + registry still waits until CP6-7. This step makes the current match registry-shaped without introducing dynamic dispatch.
+- **3.5c — Move agent loop to `agent.rs`**. Move `run_agent_turn`, `MAX_TOOL_ROUNDS`, and loop orchestration out of `lib.rs`. The agent loop calls the concrete Anthropic module and the concrete tools module. *Rust:* borrowing `&mut Vec<Message>` through orchestration, module boundaries around control flow.
+    - *Iterates into:* CP5 streaming and CP7 hooks will change how the loop emits progress, but this step preserves the current request-tool-result loop.
+- **3.5d — Move REPL and slash commands to `repl.rs`**. Move `run`, `print_help`, startup setup, and the slash-command `match` out of `lib.rs`. Leave `/exit` and `/help` concrete. *Rust:* library exports, binary crate calling `cawir::run`, keeping surface code separate from engine code.
+    - *Iterates into:* `/mode` in CP4 will extend the concrete slash-command match before any command registry exists.
+
+Expected shape after 3.5:
+
+```text
+src/
+  main.rs
+  lib.rs
+  error.rs
+  session.rs
+  anthropic.rs
+  tools.rs
+  agent.rs
+  repl.rs
+```
+
+*Deferred:*
+- `Provider` trait → CP6, when OpenAI is added.
+- `Tool` trait + registry → CP6-7, when provider/tool registration pressure is real.
+- `Command` trait + registry → CP6-7, when `/provider <name>` adds arguments and hook-configured commands add a dynamic source.
+- `PermissionMode` enum + `/mode` → CP4.
+
+Done when: `lib.rs` is mostly module declarations and public exports; behavior is unchanged; tests live beside the modules they exercise; `cargo fmt --check`, `cargo test`, and `cargo clippy --all-targets -- -D warnings` pass after each sub-step.
+
+Components: Core engine, Surface, External.
 
 ---
 
