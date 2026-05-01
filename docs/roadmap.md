@@ -94,7 +94,7 @@ The soul of cawir. cawir stops being "chat with Claude" and becomes a real codin
 - `PermissionMode` enum + `/mode` → CP4
 - Plan mode + `ExitPlanMode` → CP4
 - Multi-source tool registration (plugins/MCP) → post-CP9
-- Tool-output budgeting → later CP3/CP4 cleanup. Add file-size caps or ranged reads so one `read_file` cannot inject a huge file into history by default.
+- Tool-output budgeting → later CP4 cleanup. Add file-size caps or ranged reads so one `read_file` cannot inject a huge file into history by default. Add stdout/stderr byte or line caps for `shell`, with clear truncation markers; Checkpoint 3i currently decodes process output into one lossy UTF-8 string for simplicity.
 - Rate-limit recovery → later External cleanup. Parse 429 `retry-after` / rate-limit headers and decide whether to wait, retry, or return a clearer recoverable error.
 - Cache observability → later External cleanup. Parse Anthropic `usage` fields such as `input_tokens`, `cache_creation_input_tokens`, and `cache_read_input_tokens` so cache behavior is visible while learning.
 

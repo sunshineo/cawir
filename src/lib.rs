@@ -3,7 +3,10 @@ pub mod session;
 
 pub use error::{Error, Result};
 
-use std::io::{self, Write};
+use std::{
+    io::{self, Write},
+    process::Command,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -137,7 +140,12 @@ async fn ask_claude(
             kind: "ephemeral".to_string(),
         },
         messages: messages.to_vec(),
-        tools: vec![list_files_tool(), read_file_tool(), write_file_tool()],
+        tools: vec![
+            list_files_tool(),
+            read_file_tool(),
+            write_file_tool(),
+            shell_tool(),
+        ],
     };
 
     let response = client
@@ -230,6 +238,24 @@ fn write_file_tool() -> ToolDefinition {
     }
 }
 
+fn shell_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "shell".to_string(),
+        description: "Run a shell command in the current project. Do not use shell for directory listings, file reads, or file writes; use the dedicated list_files, read_file, and write_file tools for those. Use shell for commands that need a process, such as tests, formatters, builds, git commands, or search commands. The command will require explicit user approval before it runs.".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The shell command to run from the current working directory."
+                }
+            },
+            "required": ["command"],
+            "additionalProperties": false
+        }),
+    }
+}
+
 fn render_text_blocks(blocks: &[MessageContent]) -> String {
     blocks
         .iter()
@@ -284,6 +310,7 @@ fn execute_tool_call(name: &str, input: &Value) -> Result<String> {
         "list_files" => execute_list_files(input),
         "read_file" => execute_read_file(input),
         "write_file" => execute_write_file(input),
+        "shell" => execute_shell(input),
         _ => Err(Error::UnknownTool(name.to_string())),
     }
 }
@@ -379,6 +406,56 @@ fn approve_write_interactively(path: &str, content: &str) -> Result<bool> {
     io::stdin().read_line(&mut answer)?;
 
     Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES"))
+}
+
+fn execute_shell(input: &Value) -> Result<String> {
+    execute_shell_with_approval(input, approve_shell_interactively)
+}
+
+fn execute_shell_with_approval<F>(input: &Value, mut approve: F) -> Result<String>
+where
+    F: FnMut(&str) -> Result<bool>,
+{
+    let command = input
+        .get("command")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::ToolInput {
+            tool: "shell".to_string(),
+            message: "expected input.command to be a string".to_string(),
+        })?;
+
+    if !approve(command)? {
+        return Err(Error::ToolDenied {
+            tool: "shell".to_string(),
+            message: format!("user denied shell command: {}", command),
+        });
+    }
+
+    let output = Command::new("sh").arg("-c").arg(command).output()?;
+
+    Ok(format_shell_output(&output))
+}
+
+fn approve_shell_interactively(command: &str) -> Result<bool> {
+    println!("shell wants to run: {}", command);
+    print!("approve command? [y/N] ");
+    io::stdout().flush()?;
+
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES"))
+}
+
+fn format_shell_output(output: &std::process::Output) -> String {
+    let status = match output.status.code() {
+        Some(code) => format!("exit status: {}", code),
+        None => "exit status: terminated by signal".to_string(),
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    format!("{}\nstdout:\n{}\nstderr:\n{}", status, stdout, stderr)
 }
 
 fn print_tool_result(name: &str, result: &str) {
@@ -747,5 +824,63 @@ mod tests {
             }
             other => panic!("expected tool input error, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn executes_shell_tool_call_when_approved() {
+        let input = json!({
+            "command": "printf 'hello from stdout'; printf 'hello from stderr' >&2"
+        });
+
+        let result = execute_shell_with_approval(&input, |_| Ok(true)).unwrap();
+
+        assert_eq!(
+            result,
+            "exit status: 0\nstdout:\nhello from stdout\nstderr:\nhello from stderr"
+        );
+    }
+
+    #[test]
+    fn shell_denial_returns_tool_error() {
+        let input = json!({
+            "command": "cargo test"
+        });
+
+        let error = execute_shell_with_approval(&input, |_| Ok(false)).unwrap_err();
+
+        match error {
+            Error::ToolDenied { tool, message } => {
+                assert_eq!(tool, "shell");
+                assert_eq!(message, "user denied shell command: cargo test");
+            }
+            other => panic!("expected tool denied error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn shell_requires_string_command() {
+        let error = execute_tool_call("shell", &json!({})).unwrap_err();
+
+        match error {
+            Error::ToolInput { tool, message } => {
+                assert_eq!(tool, "shell");
+                assert_eq!(message, "expected input.command to be a string");
+            }
+            other => panic!("expected tool input error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn shell_returns_nonzero_status_and_stderr() {
+        let input = json!({
+            "command": "printf 'failure details' >&2; exit 7"
+        });
+
+        let result = execute_shell_with_approval(&input, |_| Ok(true)).unwrap();
+
+        assert_eq!(
+            result,
+            "exit status: 7\nstdout:\n\nstderr:\nfailure details"
+        );
     }
 }
