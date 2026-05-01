@@ -26,6 +26,9 @@ pub enum Error {
     #[error("invalid input for tool {tool}: {message}")]
     ToolInput { tool: String, message: String },
 
+    #[error("tool {tool} denied: {message}")]
+    ToolDenied { tool: String, message: String },
+
     #[error("tool loop exceeded {0} rounds")]
     ToolLoopLimitExceeded(usize),
 }

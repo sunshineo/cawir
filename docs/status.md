@@ -9,10 +9,10 @@ This document tracks the current implementation state and recent progress.
 ## Snapshot (as of 2026-05-01)
 
 - Current focus: **Checkpoint 3 — Agent loop**.
-- Next sub-step: **3h — First mutating tool: write_file with inline approval**.
-- Latest completed sub-step: **3g — Tool failures become tool results**.
-- Planned next order: complete the read-only loop first (`3e`, `3f`, `3g`), then add mutating tools with approval (`3h`, `3i`).
-- Current user-visible behavior: one user prompt can trigger repeated `read_file` and `list_files` calls. cawir executes each read-only tool request, sends matching `tool_result` blocks back to Claude, and continues until Claude returns a text answer or the 42-round tool-loop cap is reached. Tool execution failures are returned to Claude as error `tool_result` blocks instead of aborting the turn.
+- Next sub-step: **3i — Second mutating tool: shell with inline approval**.
+- Latest completed sub-step: **3h — First mutating tool: write_file with inline approval**.
+- Planned next order: add `shell` with inline approval (`3i`), then move into Checkpoint 4 permission modes.
+- Current user-visible behavior: one user prompt can trigger repeated `read_file`, `list_files`, and approval-gated `write_file` calls. cawir executes each tool request, sends matching `tool_result` blocks back to Claude, and continues until Claude returns a text answer or the 42-round tool-loop cap is reached. Tool execution failures and denied writes are returned to Claude as error `tool_result` blocks instead of aborting the turn.
 
 ## Completed checkpoints
 
@@ -39,9 +39,10 @@ This document tracks the current implementation state and recent progress.
 - `3e` completed on 2026-04-30. `Message` content is now stored as serializable content blocks, so cawir can append an assistant `tool_use`, send one user `tool_result`, and print Claude's follow-up response.
 - `3f` completed on 2026-04-30. The one-shot tool-result path is now a read-only agent loop: cawir keeps calling Claude, executing `read_file` and `list_files`, and appending tool results until Claude returns text.
 - `3g` completed on 2026-05-01. Tool execution failures now become `tool_result` blocks with `is_error: true`, so Claude can recover from missing files, invalid tool input, and unknown tool names inside the loop.
+- `3h` completed on 2026-05-01. Added `write_file` as the first mutating tool, gated by an inline REPL approval prompt. Approved writes use `std::fs::write`; denied writes and write failures flow back through error `tool_result` blocks.
 
 ## Learnings
 
-- `learnings-rust/` currently includes notes `01` through `25`.
-- `learnings-agent/` stores coding-agent design notes.
+- `learnings-rust/` currently includes notes `01` through `26`.
+- `learnings-agent/` currently includes notes `01` through `03`.
 - New Rust discussions should be distilled into `learnings-rust/*.md`; new agent-design discussions should be distilled into `learnings-agent/*.md`.

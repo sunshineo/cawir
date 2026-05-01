@@ -130,3 +130,63 @@ take one ToolResult argument, unpack its fields, then run the closure body
 ```
 
 The pipes are closure syntax. The `ToolResult { ... }` part is destructuring.
+
+## Passing callable behavior into a function
+
+Checkpoint 3h used a closure-like parameter to make `write_file` testable:
+
+```rust
+fn execute_write_file_with_approval<F>(input: &Value, mut approve: F) -> Result<String>
+where
+    F: FnMut(&str, &str) -> Result<bool>,
+{
+    if !approve(path, content)? {
+        // denied
+    }
+}
+```
+
+This means:
+
+> `approve` can be any callable value that takes `&str` path and `&str` content, and returns `Result<bool>`.
+
+The production path passes a normal function:
+
+```rust
+execute_write_file_with_approval(input, approve_write_interactively)
+```
+
+Tests pass small closures:
+
+```rust
+execute_write_file_with_approval(&input, |_, _| Ok(true))
+execute_write_file_with_approval(&input, |_, _| Ok(false))
+```
+
+This is dependency injection without introducing a trait object or interface. The write logic does not know whether approval came from stdin, a test closure, or some future policy layer. It only knows it can call `approve(path, content)`.
+
+## The three callable traits
+
+Rust models callable values with three standard traits:
+
+```rust
+FnOnce
+FnMut
+Fn
+```
+
+Their relationship is about what the callable is allowed to do with captured state:
+
+- `FnOnce` can be called at least once and may consume captured values.
+- `FnMut` can be called repeatedly and may mutate captured state.
+- `Fn` can be called repeatedly without mutating captured state.
+
+`FnMut` was a useful middle choice for approval because it accepts ordinary functions, simple test closures, and closures that might update captured test state.
+
+The binding itself must be mutable:
+
+```rust
+mut approve: F
+```
+
+because calling an `FnMut` may mutate the callable value.

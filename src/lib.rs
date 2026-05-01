@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use crate::session::{Message, MessageContent, ToolResult};
 
 const MAX_TOOL_ROUNDS: usize = 42;
+const MAX_OUTPUT_TOKENS: u32 = 16_384;
 
 #[derive(Serialize)]
 struct MessageRequest {
@@ -131,12 +132,12 @@ async fn ask_claude(
 ) -> Result<ClaudeResponse> {
     let req = MessageRequest {
         model: "claude-haiku-4-5-20251001".to_string(),
-        max_tokens: 1024,
+        max_tokens: MAX_OUTPUT_TOKENS,
         cache_control: CacheControl {
             kind: "ephemeral".to_string(),
         },
         messages: messages.to_vec(),
-        tools: vec![list_files_tool(), read_file_tool()],
+        tools: vec![list_files_tool(), read_file_tool(), write_file_tool()],
     };
 
     let response = client
@@ -207,6 +208,28 @@ fn list_files_tool() -> ToolDefinition {
     }
 }
 
+fn write_file_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "write_file".to_string(),
+        description: "Write UTF-8 text content to a file in the current project. Use this only when the user asks you to create or replace a file. The write will require explicit user approval before it runs.".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file to write, preferably relative to the current working directory."
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The complete UTF-8 text content to write to the file."
+                }
+            },
+            "required": ["path", "content"],
+            "additionalProperties": false
+        }),
+    }
+}
+
 fn render_text_blocks(blocks: &[MessageContent]) -> String {
     blocks
         .iter()
@@ -260,6 +283,7 @@ fn execute_tool_call(name: &str, input: &Value) -> Result<String> {
     match name {
         "list_files" => execute_list_files(input),
         "read_file" => execute_read_file(input),
+        "write_file" => execute_write_file(input),
         _ => Err(Error::UnknownTool(name.to_string())),
     }
 }
@@ -301,6 +325,60 @@ fn execute_read_file(input: &Value) -> Result<String> {
         })?;
 
     Ok(std::fs::read_to_string(path)?)
+}
+
+fn execute_write_file(input: &Value) -> Result<String> {
+    execute_write_file_with_approval(input, approve_write_interactively)
+}
+
+fn execute_write_file_with_approval<F>(input: &Value, mut approve: F) -> Result<String>
+where
+    F: FnMut(&str, &str) -> Result<bool>,
+{
+    let path = input
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::ToolInput {
+            tool: "write_file".to_string(),
+            message: "expected input.path to be a string".to_string(),
+        })?;
+
+    let content = input
+        .get("content")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::ToolInput {
+            tool: "write_file".to_string(),
+            message: format!(
+                "expected input.content to be a string; received input: {}",
+                input
+            ),
+        })?;
+
+    if !approve(path, content)? {
+        return Err(Error::ToolDenied {
+            tool: "write_file".to_string(),
+            message: format!("user denied write to {}", path),
+        });
+    }
+
+    std::fs::write(path, content)?;
+
+    Ok(format!("wrote {} bytes to {}", content.len(), path))
+}
+
+fn approve_write_interactively(path: &str, content: &str) -> Result<bool> {
+    println!(
+        "write_file wants to write {} bytes to {}",
+        content.len(),
+        path
+    );
+    print!("approve write? [y/N] ");
+    io::stdout().flush()?;
+
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES"))
 }
 
 fn print_tool_result(name: &str, result: &str) {
@@ -446,7 +524,7 @@ mod tests {
     fn message_request_enables_automatic_prompt_caching() {
         let request = MessageRequest {
             model: "claude-haiku-4-5-20251001".to_string(),
-            max_tokens: 1024,
+            max_tokens: MAX_OUTPUT_TOKENS,
             cache_control: CacheControl {
                 kind: "ephemeral".to_string(),
             },
@@ -460,6 +538,7 @@ mod tests {
             serialized.get("cache_control"),
             Some(&json!({ "type": "ephemeral" }))
         );
+        assert_eq!(serialized.get("max_tokens"), Some(&json!(16_384)));
     }
 
     #[test]
@@ -602,6 +681,69 @@ mod tests {
             Error::ToolInput { tool, message } => {
                 assert_eq!(tool, "list_files");
                 assert_eq!(message, "expected input.path to be a string");
+            }
+            other => panic!("expected tool input error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn executes_write_file_tool_call_when_approved() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "cawir-write-file-test-{}-{}.txt",
+            std::process::id(),
+            unique
+        ));
+
+        let input = json!({
+            "path": path.to_string_lossy(),
+            "content": "hello from cawir\n"
+        });
+        let result = execute_write_file_with_approval(&input, |_, _| Ok(true)).unwrap();
+
+        assert_eq!(
+            result,
+            format!("wrote 17 bytes to {}", path.to_string_lossy())
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "hello from cawir\n"
+        );
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn write_file_denial_returns_tool_error() {
+        let input = json!({
+            "path": "scratch.txt",
+            "content": "hello from cawir\n"
+        });
+
+        let error = execute_write_file_with_approval(&input, |_, _| Ok(false)).unwrap_err();
+
+        match error {
+            Error::ToolDenied { tool, message } => {
+                assert_eq!(tool, "write_file");
+                assert_eq!(message, "user denied write to scratch.txt");
+            }
+            other => panic!("expected tool denied error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn write_file_requires_string_content() {
+        let error = execute_tool_call("write_file", &json!({ "path": "scratch.txt" })).unwrap_err();
+
+        match error {
+            Error::ToolInput { tool, message } => {
+                assert_eq!(tool, "write_file");
+                assert!(message.contains("expected input.content to be a string"));
+                assert!(message.contains("received input"));
+                assert!(message.contains(r#""path":"scratch.txt""#));
             }
             other => panic!("expected tool input error, got {:?}", other),
         }
