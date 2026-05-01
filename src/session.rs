@@ -1,10 +1,21 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Message {
     pub role: String,
     pub content: Vec<MessageContent>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolResult {
+    pub tool_use_id: String,
+    pub content: String,
+    pub is_error: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -24,6 +35,8 @@ pub enum MessageContent {
     ToolResult {
         tool_use_id: String,
         content: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        is_error: bool,
     },
 }
 
@@ -50,19 +63,27 @@ impl Message {
             content: vec![MessageContent::ToolResult {
                 tool_use_id,
                 content,
+                is_error: false,
             }],
         }
     }
 
-    pub fn user_tool_results(results: Vec<(String, String)>) -> Self {
+    pub fn user_tool_results(results: Vec<ToolResult>) -> Self {
         Self {
             role: "user".to_string(),
             content: results
                 .into_iter()
-                .map(|(tool_use_id, content)| MessageContent::ToolResult {
-                    tool_use_id,
-                    content,
-                })
+                .map(
+                    |ToolResult {
+                         tool_use_id,
+                         content,
+                         is_error,
+                     }| MessageContent::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    },
+                )
                 .collect(),
         }
     }

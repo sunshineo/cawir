@@ -288,6 +288,48 @@ reqwest::Error -> Error::Http(reqwest_error)
 
 `thiserror` just writes the repetitive glue.
 
+## `?` with `Option`
+
+The `?` operator also works with `Option<T>`.
+
+With `Result`, the two cases are:
+
+```text
+Ok(value)  -> keep going with value
+Err(error) -> return Err(error) from the current function
+```
+
+With `Option`, the two cases are:
+
+```text
+Some(value) -> keep going with value
+None        -> return None from the current function
+```
+
+This:
+
+```rust
+fn first_char(text: &str) -> Option<char> {
+    let ch = text.chars().next()?;
+    Some(ch)
+}
+```
+
+means roughly:
+
+```rust
+fn first_char(text: &str) -> Option<char> {
+    let ch = match text.chars().next() {
+        Some(ch) => ch,
+        None => return None,
+    };
+
+    Some(ch)
+}
+```
+
+So the enclosing function must return a compatible type. If `?` may need to return `None`, the function cannot promise to return a plain `char`; it needs to return `Option<char>`.
+
 ## The takeaway
 
 This line:
@@ -305,4 +347,3 @@ means:
 - Let `?` automatically convert `reqwest::Error` into `Error`.
 
 Compact Rust often hides generated trait implementations. When in doubt, expand it mentally into `match`, `return Err(...)`, and `impl From`.
-

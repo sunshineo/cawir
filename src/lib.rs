@@ -8,7 +8,7 @@ use std::io::{self, Write};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::session::{Message, MessageContent};
+use crate::session::{Message, MessageContent, ToolResult};
 
 const MAX_TOOL_ROUNDS: usize = 42;
 
@@ -112,7 +112,7 @@ async fn run_agent_turn(
                     return Err(Error::ToolLoopLimitExceeded(MAX_TOOL_ROUNDS));
                 }
 
-                let tool_results = execute_tool_uses(&blocks)?;
+                let tool_results = execute_tool_uses(&blocks);
                 if tool_results.is_empty() {
                     return Err(Error::EmptyContent);
                 }
@@ -218,7 +218,7 @@ fn render_text_blocks(blocks: &[MessageContent]) -> String {
         .join("\n")
 }
 
-fn execute_tool_uses(blocks: &[MessageContent]) -> Result<Vec<(String, String)>> {
+fn execute_tool_uses(blocks: &[MessageContent]) -> Vec<ToolResult> {
     let mut results = Vec::new();
 
     for block in blocks {
@@ -228,15 +228,32 @@ fn execute_tool_uses(blocks: &[MessageContent]) -> Result<Vec<(String, String)>>
             }
             MessageContent::ToolUse { id, name, input } => {
                 println!("tool request: {} ({})", name, id);
-                let result = execute_tool_call(name, input)?;
-                print_tool_result(name, &result);
-                results.push((id.clone(), result));
+                let result = match execute_tool_call(name, input) {
+                    Ok(content) => {
+                        print_tool_result(name, &content);
+                        ToolResult {
+                            tool_use_id: id.clone(),
+                            content,
+                            is_error: false,
+                        }
+                    }
+                    Err(error) => {
+                        let content = error.to_string();
+                        print_tool_error(name, &content);
+                        ToolResult {
+                            tool_use_id: id.clone(),
+                            content,
+                            is_error: true,
+                        }
+                    }
+                };
+                results.push(result);
             }
             MessageContent::ToolResult { .. } => {}
         }
     }
 
-    Ok(results)
+    results
 }
 
 fn execute_tool_call(name: &str, input: &Value) -> Result<String> {
@@ -288,6 +305,10 @@ fn execute_read_file(input: &Value) -> Result<String> {
 
 fn print_tool_result(name: &str, result: &str) {
     println!("tool result from {}: {} bytes", name, result.len());
+}
+
+fn print_tool_error(name: &str, error: &str) {
+    println!("tool error from {}: {}", name, error);
 }
 
 fn print_help() {
@@ -390,6 +411,31 @@ mod tests {
     }
 
     #[test]
+    fn serializes_error_tool_result_message_for_anthropic() {
+        let message = Message::user_tool_results(vec![ToolResult {
+            tool_use_id: "toolu_123".to_string(),
+            content: "io error: No such file or directory".to_string(),
+            is_error: true,
+        }]);
+        let serialized = serde_json::to_value(message).unwrap();
+
+        assert_eq!(
+            serialized,
+            json!({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_123",
+                        "content": "io error: No such file or directory",
+                        "is_error": true
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
     fn tool_loop_limit_error_names_the_limit() {
         let error = Error::ToolLoopLimitExceeded(MAX_TOOL_ROUNDS);
 
@@ -447,17 +493,46 @@ mod tests {
             },
         ];
 
-        let results = execute_tool_uses(&blocks).unwrap();
+        let results = execute_tool_uses(&blocks);
 
         assert_eq!(
             results,
             vec![
-                ("toolu_first".to_string(), "first result".to_string()),
-                ("toolu_second".to_string(), "first.txt".to_string())
+                ToolResult {
+                    tool_use_id: "toolu_first".to_string(),
+                    content: "first result".to_string(),
+                    is_error: false,
+                },
+                ToolResult {
+                    tool_use_id: "toolu_second".to_string(),
+                    content: "first.txt".to_string(),
+                    is_error: false,
+                }
             ]
         );
 
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn tool_execution_turns_failures_into_error_results() {
+        let blocks = vec![MessageContent::ToolUse {
+            id: "toolu_missing_path".to_string(),
+            name: "read_file".to_string(),
+            input: json!({}),
+        }];
+
+        let results = execute_tool_uses(&blocks);
+
+        assert_eq!(
+            results,
+            vec![ToolResult {
+                tool_use_id: "toolu_missing_path".to_string(),
+                content: "invalid input for tool read_file: expected input.path to be a string"
+                    .to_string(),
+                is_error: true,
+            }]
+        );
     }
 
     #[test]
