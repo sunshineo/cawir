@@ -9,8 +9,8 @@ This document tracks the current implementation state and recent progress.
 ## Snapshot (as of 2026-05-01)
 
 - Current focus: **Checkpoint 3.5 — Refactor shape**.
-- Next sub-step: **3.5a — Move Anthropic API code to `anthropic.rs`**.
-- Latest completed sub-step: **3i — Second mutating tool: shell with inline approval**.
+- Next sub-step: **3.5b — Move tools to `tools.rs`**.
+- Latest completed sub-step: **3.5a — Move Anthropic API code to `anthropic.rs`**.
 - Planned next order: split `lib.rs` incrementally through `3.5a-d`, then move into Checkpoint 4 permission modes.
 - Current user-visible behavior: one user prompt can trigger repeated `read_file`, `list_files`, approval-gated `write_file`, and approval-gated `shell` calls. cawir executes each tool request, sends matching `tool_result` blocks back to Claude, and continues until Claude returns a text answer or the 42-round tool-loop cap is reached. Tool execution failures and denied mutating actions are returned to Claude as error `tool_result` blocks instead of aborting the turn.
 
@@ -41,6 +41,10 @@ This document tracks the current implementation state and recent progress.
 - `3g` completed on 2026-05-01. Tool execution failures now become `tool_result` blocks with `is_error: true`, so Claude can recover from missing files, invalid tool input, and unknown tool names inside the loop.
 - `3h` completed on 2026-05-01. Added `write_file` as the first mutating tool, gated by an inline REPL approval prompt. Approved writes use `std::fs::write`; denied writes and write failures flow back through error `tool_result` blocks.
 - `3i` completed on 2026-05-01. Added `shell` as the second mutating tool, gated by an inline REPL approval prompt. Approved commands run through `std::process::Command`, and stdout, stderr, exit status, denials, and execution failures flow back through the tool-result path.
+
+### 3.5 — Refactor shape
+
+- `3.5a` completed on 2026-05-01. Moved concrete Anthropic request/response structs, `ask_claude`, text rendering, and Anthropic API tests into `src/anthropic.rs`. `lib.rs` still owns the agent loop, REPL, and tools until later 3.5 sub-steps.
 
 ## Learnings
 

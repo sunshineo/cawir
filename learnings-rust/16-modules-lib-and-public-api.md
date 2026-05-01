@@ -190,3 +190,151 @@ The type still happens to match Anthropic's message shape today, but its concept
 
 The 2f split did not change behavior; it changed where responsibilities live.
 
+## `pub(crate)` for internal module seams
+
+Checkpoint 3.5a moved the concrete Anthropic API code to `src/anthropic.rs`.
+
+Some names need to cross module boundaries inside cawir, but they are not part of the public API that outside crates should use:
+
+```rust
+pub(crate) enum ClaudeResponse {
+    Text(String),
+    ToolUse(Vec<MessageContent>),
+}
+```
+
+`pub(crate)` means:
+
+> Visible anywhere inside this crate, but not visible to code outside this crate.
+
+That fits an application module seam. `lib.rs` needs to call `anthropic::ask_claude`, and the agent loop needs to match on `ClaudeResponse`, but external callers do not need a stable Anthropic API surface.
+
+This is narrower than `pub`:
+
+```rust
+pub(crate) async fn ask_claude(...) -> Result<ClaudeResponse>
+```
+
+The function is shared internally, but cawir is not promising it as a library API.
+
+3.5a also kept tests beside the private API structs:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+}
+```
+
+A child `tests` module can access private items from its parent module through `use super::*`. That is why `MessageRequest` and `MessageResponse` can stay private while still being directly tested.
+
+## Crates, modules, and visibility levels
+
+A Rust crate is the compilation unit. In cawir, `src/lib.rs` is the root of the library crate, and `src/main.rs` is the root of the binary crate.
+
+Inside a crate, code is organized into a module tree:
+
+```rust
+mod anthropic;
+mod error;
+mod session;
+```
+
+`mod anthropic;` tells Rust to include `src/anthropic.rs` as a module named `anthropic`. A file on disk is not compiled just because it exists; it must be included by the module tree.
+
+Modules are similar to Java packages or namespaces, but Rust uses modules as privacy boundaries too.
+
+Common visibility levels:
+
+```rust
+fn helper() {}
+```
+
+Private. Visible to the current module and child modules.
+
+```rust
+pub fn public_api() {}
+```
+
+Public, as long as the parent modules are also public.
+
+```rust
+pub(crate) fn internal_api() {}
+```
+
+Visible anywhere inside the current crate, but not visible to external crates. This is useful for internal application seams.
+
+```rust
+pub(super) fn parent_only() {}
+```
+
+Visible to the parent module.
+
+```rust
+pub(in crate::some_module) fn limited() {}
+```
+
+Visible only within a specific module path.
+
+Visibility applies separately to structs and their fields:
+
+```rust
+pub(crate) struct ToolDefinition {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) input_schema: serde_json::Value,
+}
+```
+
+Here, both the struct and its fields are visible throughout the crate.
+
+If the fields were private:
+
+```rust
+pub(crate) struct ToolDefinition {
+    name: String,
+}
+```
+
+then other modules could name `ToolDefinition`, but they could not construct it with a struct literal or read `name` directly.
+
+One subtle rule: public visibility is capped by the parent module.
+
+```rust
+mod anthropic {
+    pub fn ask_claude() {}
+}
+```
+
+`ask_claude` is marked `pub`, but `anthropic` itself is private. External crates still cannot call `cawir::anthropic::ask_claude`.
+
+## Java comparison
+
+Roughly:
+
+| Java | Rust |
+|---|---|
+| package | module |
+| fully qualified class name | module path |
+| `import com.example.Foo` | `use crate::foo::Foo` |
+| `public` | `pub` |
+| package-private | closest common Rust analogue is `pub(crate)`, but `pub(crate)` is crate-wide |
+| `private` | private by default |
+
+The comparison is useful, but not exact.
+
+Java package-private means "visible to classes in the same package." Rust's `pub(crate)` means "visible anywhere inside this crate." Rust can be more precise with `pub(super)` and `pub(in path)`.
+
+For cawir:
+
+```rust
+mod anthropic;
+```
+
+means Anthropic is an internal module.
+
+```rust
+pub(crate) async fn ask_claude(...)
+```
+
+means other cawir modules may call it, but external crates should not treat it as public API.
