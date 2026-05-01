@@ -9,8 +9,8 @@ This document tracks the current implementation state and recent progress.
 ## Snapshot (as of 2026-05-01)
 
 - Current focus: **Checkpoint 3.5 — Refactor shape**.
-- Next sub-step: **3.5b — Move tools to `tools.rs`**.
-- Latest completed sub-step: **3.5a — Move Anthropic API code to `anthropic.rs`**.
+- Next sub-step: **3.5c — Move agent loop to `agent.rs`**.
+- Latest completed sub-step: **3.5b — Move tools to `tools.rs`**.
 - Planned next order: split `lib.rs` incrementally through `3.5a-d`, then move into Checkpoint 4 permission modes.
 - Current user-visible behavior: one user prompt can trigger repeated `read_file`, `list_files`, approval-gated `write_file`, and approval-gated `shell` calls. cawir executes each tool request, sends matching `tool_result` blocks back to Claude, and continues until Claude returns a text answer or the 42-round tool-loop cap is reached. Tool execution failures and denied mutating actions are returned to Claude as error `tool_result` blocks instead of aborting the turn.
 
@@ -45,6 +45,7 @@ This document tracks the current implementation state and recent progress.
 ### 3.5 — Refactor shape
 
 - `3.5a` completed on 2026-05-01. Moved concrete Anthropic request/response structs, `ask_claude`, text rendering, and Anthropic API tests into `src/anthropic.rs`. `lib.rs` still owns the agent loop, REPL, and tools until later 3.5 sub-steps.
+- `3.5b` completed on 2026-05-01. Moved tool schemas, tool dispatch, tool execution, approval prompts, and tool tests into `src/tools.rs`. `lib.rs` now uses the concrete `tools::definitions()` and `tools::execute_tool_uses()` surface while the tool internals stay private.
 
 ## Learnings
 

@@ -338,3 +338,32 @@ pub(crate) async fn ask_claude(...)
 ```
 
 means other cawir modules may call it, but external crates should not treat it as public API.
+
+## Module-level functions before traits
+
+Checkpoint 3.5b moved the concrete tools into `src/tools.rs`.
+
+The module exposes two functions to the rest of the crate:
+
+```rust
+pub(crate) fn definitions() -> Vec<ToolDefinition>
+pub(crate) fn execute_tool_uses(blocks: &[MessageContent]) -> Vec<ToolResult>
+```
+
+The helper functions remain private:
+
+```rust
+fn execute_tool_call(...)
+fn execute_read_file(...)
+fn execute_write_file(...)
+fn execute_shell(...)
+```
+
+This creates a clear module boundary without introducing a trait yet. Other modules can ask:
+
+- What tools are available?
+- Execute these tool-use blocks.
+
+They cannot reach into the module and call every helper directly.
+
+This is an idiomatic intermediate shape in Rust: use a module with a small public surface first, then extract traits later when multiple implementations create real pressure. A trait is not required just to organize code by responsibility.
