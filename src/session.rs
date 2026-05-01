@@ -53,4 +53,17 @@ impl Message {
             }],
         }
     }
+
+    pub fn user_tool_results(results: Vec<(String, String)>) -> Self {
+        Self {
+            role: "user".to_string(),
+            content: results
+                .into_iter()
+                .map(|(tool_use_id, content)| MessageContent::ToolResult {
+                    tool_use_id,
+                    content,
+                })
+                .collect(),
+        }
+    }
 }

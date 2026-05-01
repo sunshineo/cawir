@@ -111,6 +111,8 @@ Lifecycle:
 - Calls the `Provider` + `AuthMethod` to talk to the model, streaming response tokens.
 - Cancelable — dropping the stream aborts in-flight work cleanly.
 
+**Tool-loop cap.** Agent turns must have a bounded number of tool rounds so a bad prompt, model loop, or protocol bug cannot burn tokens indefinitely. The current read-only checkpoint uses `MAX_TOOL_ROUNDS = 42`: each model response containing one or more tool calls counts as one round. Exceeding the cap returns a typed error and rolls back the current user turn. This is a runtime safety rail, not a provider abstraction; later settings can make the cap configurable without changing the loop shape.
+
 **Events and hook dispatch** — events are a typed enum defined in the core engine. Two consumption patterns of the same events:
 
 ```rust

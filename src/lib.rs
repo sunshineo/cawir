@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 
 use crate::session::{Message, MessageContent};
 
+const MAX_TOOL_ROUNDS: usize = 42;
+
 #[derive(Serialize)]
 struct MessageRequest {
     model: String,
@@ -33,13 +35,6 @@ struct MessageResponse {
 enum ClaudeResponse {
     Text(String),
     ToolUse(Vec<MessageContent>),
-}
-
-struct ToolExecution {
-    assistant_content: Vec<MessageContent>,
-    tool_use_id: String,
-    tool_name: String,
-    tool_result: String,
 }
 
 pub async fn run() -> Result<()> {
@@ -76,27 +71,9 @@ pub async fn run() -> Result<()> {
                     let history_len_before_turn = history.len();
                     history.push(Message::user_text(other));
 
-                    match ask_claude(&client, &api_key, &history).await {
-                        Ok(ClaudeResponse::Text(reply)) => {
-                            println!("claude: {}", reply);
-                            history.push(Message::assistant(vec![MessageContent::Text {
-                                text: reply,
-                            }]));
-                        }
-                        Ok(ClaudeResponse::ToolUse(blocks)) => {
-                            match handle_one_tool_use(&client, &api_key, &mut history, blocks).await
-                            {
-                                Ok(()) => {}
-                                Err(e) => {
-                                    eprintln!("error: {}", e);
-                                    history.truncate(history_len_before_turn);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("error: {}", e);
-                            history.truncate(history_len_before_turn);
-                        }
+                    if let Err(e) = run_agent_turn(&client, &api_key, &mut history).await {
+                        eprintln!("error: {}", e);
+                        history.truncate(history_len_before_turn);
                     }
                 }
             }
@@ -104,6 +81,40 @@ pub async fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn run_agent_turn(
+    client: &reqwest::Client,
+    api_key: &str,
+    history: &mut Vec<Message>,
+) -> Result<()> {
+    let mut tool_rounds = 0;
+
+    loop {
+        match ask_claude(client, api_key, history).await? {
+            ClaudeResponse::Text(reply) => {
+                println!("claude: {}", reply);
+                history.push(Message::assistant(vec![MessageContent::Text {
+                    text: reply,
+                }]));
+                return Ok(());
+            }
+            ClaudeResponse::ToolUse(blocks) => {
+                tool_rounds += 1;
+                if tool_rounds > MAX_TOOL_ROUNDS {
+                    return Err(Error::ToolLoopLimitExceeded(MAX_TOOL_ROUNDS));
+                }
+
+                let tool_results = execute_tool_uses(&blocks)?;
+                if tool_results.is_empty() {
+                    return Err(Error::EmptyContent);
+                }
+
+                history.push(Message::assistant(blocks));
+                history.push(Message::user_tool_results(tool_results));
+            }
+        }
+    }
 }
 
 async fn ask_claude(
@@ -197,44 +208,10 @@ fn render_text_blocks(blocks: &[MessageContent]) -> String {
         .join("\n")
 }
 
-async fn handle_one_tool_use(
-    client: &reqwest::Client,
-    api_key: &str,
-    history: &mut Vec<Message>,
-    blocks: Vec<MessageContent>,
-) -> Result<()> {
-    let Some(execution) = execute_first_tool_use(&blocks)? else {
-        return Err(Error::EmptyContent);
-    };
+fn execute_tool_uses(blocks: &[MessageContent]) -> Result<Vec<(String, String)>> {
+    let mut results = Vec::new();
 
-    history.push(Message::assistant(execution.assistant_content));
-    history.push(Message::user_tool_result(
-        execution.tool_use_id,
-        execution.tool_result,
-    ));
-
-    match ask_claude(client, api_key, history).await? {
-        ClaudeResponse::Text(reply) => {
-            println!("claude: {}", reply);
-            history.push(Message::assistant(vec![MessageContent::Text {
-                text: reply,
-            }]));
-        }
-        ClaudeResponse::ToolUse(blocks) => {
-            println!(
-                "claude requested another tool after {}; 3f will add the repeat loop.",
-                execution.tool_name
-            );
-            print_unhandled_tool_use_response(&blocks);
-            return Err(Error::ToolLoopNotReady);
-        }
-    }
-
-    Ok(())
-}
-
-fn execute_first_tool_use(blocks: &[MessageContent]) -> Result<Option<ToolExecution>> {
-    for (index, block) in blocks.iter().enumerate() {
+    for block in blocks {
         match block {
             MessageContent::Text { text } => {
                 println!("claude: {}", text);
@@ -243,32 +220,13 @@ fn execute_first_tool_use(blocks: &[MessageContent]) -> Result<Option<ToolExecut
                 println!("tool request: {} ({})", name, id);
                 let result = execute_tool_call(name, input)?;
                 print_tool_result(name, &result);
-                return Ok(Some(ToolExecution {
-                    assistant_content: blocks[..=index].to_vec(),
-                    tool_use_id: id.clone(),
-                    tool_name: name.clone(),
-                    tool_result: result,
-                }));
+                results.push((id.clone(), result));
             }
             MessageContent::ToolResult { .. } => {}
         }
     }
 
-    Ok(None)
-}
-
-fn print_unhandled_tool_use_response(blocks: &[MessageContent]) {
-    for block in blocks {
-        match block {
-            MessageContent::Text { text } => {
-                println!("claude: {}", text);
-            }
-            MessageContent::ToolUse { id, name, .. } => {
-                println!("tool request: {} ({})", name, id);
-            }
-            MessageContent::ToolResult { .. } => {}
-        }
-    }
+    Ok(results)
 }
 
 fn execute_tool_call(name: &str, input: &Value) -> Result<String> {
@@ -319,11 +277,7 @@ fn execute_read_file(input: &Value) -> Result<String> {
 }
 
 fn print_tool_result(name: &str, result: &str) {
-    println!("tool result from {}:", name);
-    print!("{}", result);
-    if !result.ends_with('\n') {
-        println!();
-    }
+    println!("tool result from {}: {} bytes", name, result.len());
 }
 
 fn print_help() {
@@ -426,18 +380,26 @@ mod tests {
     }
 
     #[test]
-    fn first_tool_execution_keeps_only_answered_assistant_content() {
+    fn tool_loop_limit_error_names_the_limit() {
+        let error = Error::ToolLoopLimitExceeded(MAX_TOOL_ROUNDS);
+
+        assert_eq!(error.to_string(), "tool loop exceeded 42 rounds");
+    }
+
+    #[test]
+    fn tool_execution_returns_results_for_all_tool_uses() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "cawir-first-tool-test-{}-{}.txt",
+            "cawir-multi-tool-test-{}-{}",
             std::process::id(),
             unique
         ));
 
-        std::fs::write(&path, "first result").unwrap();
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("first.txt"), "first result").unwrap();
 
         let blocks = vec![
             MessageContent::Text {
@@ -446,22 +408,26 @@ mod tests {
             MessageContent::ToolUse {
                 id: "toolu_first".to_string(),
                 name: "read_file".to_string(),
-                input: json!({ "path": path.to_string_lossy() }),
+                input: json!({ "path": path.join("first.txt").to_string_lossy() }),
             },
             MessageContent::ToolUse {
                 id: "toolu_second".to_string(),
                 name: "list_files".to_string(),
-                input: json!({ "path": "." }),
+                input: json!({ "path": path.to_string_lossy() }),
             },
         ];
 
-        let execution = execute_first_tool_use(&blocks).unwrap().unwrap();
+        let results = execute_tool_uses(&blocks).unwrap();
 
-        assert_eq!(execution.tool_use_id, "toolu_first");
-        assert_eq!(execution.tool_result, "first result");
-        assert_eq!(execution.assistant_content.len(), 2);
+        assert_eq!(
+            results,
+            vec![
+                ("toolu_first".to_string(), "first result".to_string()),
+                ("toolu_second".to_string(), "first.txt".to_string())
+            ]
+        );
 
-        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]

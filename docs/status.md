@@ -9,10 +9,10 @@ This document tracks the current implementation state and recent progress.
 ## Snapshot (as of 2026-04-30)
 
 - Current focus: **Checkpoint 3 — Agent loop**.
-- Next sub-step: **3f — Repeat until Claude stops**.
-- Latest completed sub-step: **3e — Send one tool result back**.
+- Next sub-step: **3g — Tool failures become tool results**.
+- Latest completed sub-step: **3f — Repeat until Claude stops**.
 - Planned next order: complete the read-only loop first (`3e`, `3f`, `3g`), then add mutating tools with approval (`3h`, `3i`).
-- Current user-visible behavior: if Claude emits one `read_file` or `list_files` request, cawir executes it, sends one `tool_result` back, prints Claude's follow-up answer, and returns to the REPL. If Claude asks for another tool after that, cawir prints it but does not continue the loop yet.
+- Current user-visible behavior: one user prompt can trigger repeated `read_file` and `list_files` calls. cawir executes each read-only tool request, sends matching `tool_result` blocks back to Claude, and continues until Claude returns a text answer or the 42-round tool-loop cap is reached. Tool execution failures still abort the turn until `3g`.
 
 ## Completed checkpoints
 
@@ -37,8 +37,9 @@ This document tracks the current implementation state and recent progress.
 - `3c` completed on 2026-04-30. `read_file` executes and prints raw output through the local tool path.
 - `3d` completed on 2026-04-30. `list_files` is advertised and executes as a second read-only tool, but the REPL still stops until `3e` sends a `tool_result` back to Claude.
 - `3e` completed on 2026-04-30. `Message` content is now stored as serializable content blocks, so cawir can append an assistant `tool_use`, send one user `tool_result`, and print Claude's follow-up response.
+- `3f` completed on 2026-04-30. The one-shot tool-result path is now a read-only agent loop: cawir keeps calling Claude, executing `read_file` and `list_files`, and appending tool results until Claude returns text.
 
 ## Learnings
 
-- `learnings/` currently includes notes `01` through `23`.
+- `learnings/` currently includes notes `01` through `24`.
 - New Rust discussions should be distilled into `learnings/*.md` before commit, not left only in chat history.
