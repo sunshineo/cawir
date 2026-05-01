@@ -12,7 +12,7 @@ Current completion state lives in [`status.md`](status.md). This document define
 
 Some sub-steps use simpler-than-final patterns so the Rust concept of the moment can land cleanly. Each has a planned fix point. Worth knowing up front so the rough edges don't feel like permanent design choices.
 
-- **Fail-fast error handling** (2a–2c). Every fallible call uses `?` and propagates up to `main`. Any failure exits the program. Right for a learning prototype; wrong for a shipped CLI. Per-call graceful recovery lands at **2d (Wire with REPL)** when each user line becomes a Claude call and a single bad response shouldn't end the session. Richer typed error variants land at **2f (Cleanup)** with `thiserror`. Background: `learnings/13-error-handling-fail-fast-vs-graceful.md`.
+- **Fail-fast error handling** (2a–2c). Every fallible call uses `?` and propagates up to `main`. Any failure exits the program. Right for a learning prototype; wrong for a shipped CLI. Per-call graceful recovery lands at **2d (Wire with REPL)** when each user line becomes a Claude call and a single bad response shouldn't end the session. Richer typed error variants land at **2f (Cleanup)** with `thiserror`. Background: `learnings-rust/13-error-handling-fail-fast-vs-graceful.md`.
 - **`Box<dyn Error>` as a catch-all** (2a-ii–2e). A pragmatic stepping stone that lets `?` propagate any error type. Replaced by a proper `thiserror` enum at **2f**.
 - **`ContentBlock` as a struct, not a tagged enum** (2c–2e). Only handles text blocks; will fail to deserialize tool_use blocks. Grows into a `#[serde(tag = "type")]` enum at **3b (Parse tool-use responses)**.
 - **Tool input schemas as raw `serde_json::Value`** (starting at 3a). First tool schemas are written as JSON literals with `json!` because that mirrors Anthropic's docs and keeps CP3 focused on the agent loop, not on designing a Rust model of JSON Schema. Flexible, but light on compile-time checking. If several tools make schema repetition or schema typos a real problem, extract small typed schema helpers from that concrete pressure rather than inventing a mini schema type system upfront.
@@ -94,6 +94,9 @@ The soul of cawir. cawir stops being "chat with Claude" and becomes a real codin
 - `PermissionMode` enum + `/mode` → CP4
 - Plan mode + `ExitPlanMode` → CP4
 - Multi-source tool registration (plugins/MCP) → post-CP9
+- Tool-output budgeting → later CP3/CP4 cleanup. Add file-size caps or ranged reads so one `read_file` cannot inject a huge file into history by default.
+- Rate-limit recovery → later External cleanup. Parse 429 `retry-after` / rate-limit headers and decide whether to wait, retry, or return a clearer recoverable error.
+- Cache observability → later External cleanup. Parse Anthropic `usage` fields such as `input_tokens`, `cache_creation_input_tokens`, and `cache_read_input_tokens` so cache behavior is visible while learning.
 
 Write dispatch so each arm is already the future trait method's signature.
 

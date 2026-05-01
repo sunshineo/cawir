@@ -171,4 +171,4 @@ The fix for all four is the same heuristic: **default to `&T`** for non-`Copy` t
 
 ## See also
 
-- `learnings/05-ownership-and-borrowing.md` — the foundational rules: `mut`, `&`, `&mut`, and the "many readers OR one writer" principle.
+- `learnings-rust/05-ownership-and-borrowing.md` — the foundational rules: `mut`, `&`, `&mut`, and the "many readers OR one writer" principle.

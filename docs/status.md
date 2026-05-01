@@ -41,5 +41,6 @@ This document tracks the current implementation state and recent progress.
 
 ## Learnings
 
-- `learnings/` currently includes notes `01` through `24`.
-- New Rust discussions should be distilled into `learnings/*.md` before commit, not left only in chat history.
+- `learnings-rust/` currently includes notes `01` through `24`.
+- `learnings-agent/` stores coding-agent design notes.
+- New Rust discussions should be distilled into `learnings-rust/*.md`; new agent-design discussions should be distilled into `learnings-agent/*.md`.

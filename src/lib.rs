@@ -16,8 +16,15 @@ const MAX_TOOL_ROUNDS: usize = 42;
 struct MessageRequest {
     model: String,
     max_tokens: u32,
+    cache_control: CacheControl,
     messages: Vec<Message>,
     tools: Vec<ToolDefinition>,
+}
+
+#[derive(Serialize)]
+struct CacheControl {
+    #[serde(rename = "type")]
+    kind: String,
 }
 
 #[derive(Serialize)]
@@ -125,6 +132,9 @@ async fn ask_claude(
     let req = MessageRequest {
         model: "claude-haiku-4-5-20251001".to_string(),
         max_tokens: 1024,
+        cache_control: CacheControl {
+            kind: "ephemeral".to_string(),
+        },
         messages: messages.to_vec(),
         tools: vec![list_files_tool(), read_file_tool()],
     };
@@ -384,6 +394,26 @@ mod tests {
         let error = Error::ToolLoopLimitExceeded(MAX_TOOL_ROUNDS);
 
         assert_eq!(error.to_string(), "tool loop exceeded 42 rounds");
+    }
+
+    #[test]
+    fn message_request_enables_automatic_prompt_caching() {
+        let request = MessageRequest {
+            model: "claude-haiku-4-5-20251001".to_string(),
+            max_tokens: 1024,
+            cache_control: CacheControl {
+                kind: "ephemeral".to_string(),
+            },
+            messages: vec![Message::user_text("hello")],
+            tools: Vec::new(),
+        };
+
+        let serialized = serde_json::to_value(request).unwrap();
+
+        assert_eq!(
+            serialized.get("cache_control"),
+            Some(&json!({ "type": "ephemeral" }))
+        );
     }
 
     #[test]

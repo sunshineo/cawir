@@ -14,7 +14,8 @@ The target is *not* to compete with Claude Code or Cursor. The target is a small
 - [`docs/status.md`](docs/status.md) tracks the current implementation state and what is next.
 - [`docs/roadmap.md`](docs/roadmap.md) defines the checkpoint sequence and scope.
 - [`docs/architecture.md`](docs/architecture.md) describes the target component design and extension seams.
-- `learnings/*.md` stores durable Rust notes organized by topic.
+- `learnings-rust/*.md` stores durable Rust notes organized by topic.
+- `learnings-agent/*.md` stores durable coding-agent design notes organized by topic.
 
 ## How to collaborate on this project
 
@@ -46,10 +47,10 @@ For each checkpoint (or sub-step) from [`docs/roadmap.md`](docs/roadmap.md):
 1. **Write the code.** Apply the edits; do NOT commit yet. The user reads the diff in VS Code.
 2. **Discuss.** The user asks about anything unclear — syntax, idioms, why-this-not-that. This is where Rust concepts get taught in context.
    After writing each checkpoint or sub-step, proactively propose a short list of concrete discussion prompts tied to the diff. Prefer 2-5 prompts that point at the new Rust concepts, ownership or borrowing choices, data-shape decisions, and why this step stayed concrete instead of abstract.
-3. **Save learnings.** Significant discussion points get distilled into a `learnings/*.md` file, organized by topic (not by chronology).
+3. **Save learnings.** Significant Rust discussion points get distilled into `learnings-rust/*.md`; significant coding-agent design points get distilled into `learnings-agent/*.md`. Organize by topic, not chronology.
 4. **Commit.** Once the user is satisfied and learnings are saved, commit with a message that references the checkpoint (e.g. `feat: 1a — first read`).
 
-Every implementation step is a teaching opportunity. The trail of `learnings/` files is the durable record of what's been learned.
+Every implementation step is a teaching opportunity. The trails of `learnings-rust/` and `learnings-agent/` files are the durable records of what's been learned.
 
 ## Conventions
 

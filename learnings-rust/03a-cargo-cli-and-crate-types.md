@@ -7,7 +7,7 @@ Two commands, almost identical, differing only in *where* they scaffold:
 - `cargo new foo` — creates a **new** directory named `foo`, then scaffolds inside it.
 - `cargo init` — scaffolds in the **current** directory.
 
-cawir already had `CLAUDE.md`, `learnings/`, and a git repo in place, so `cargo init` was the right call. `cargo new cawir` would have created `cawir/cawir/` — wrong nesting.
+cawir already had `CLAUDE.md`, `learnings-rust/`, and a git repo in place, so `cargo init` was the right call. `cargo new cawir` would have created `cawir/cawir/` — wrong nesting.
 
 Both commands:
 

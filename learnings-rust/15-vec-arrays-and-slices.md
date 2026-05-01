@@ -53,11 +53,11 @@ let s2: &[i32] = &v[1..4];           // slice over elements 1..4
 
 A `&[T]` parameter is the "I want to read a sequence" type — accepts `&Vec<T>` (via deref coercion) and `&[T; N]` (via coercion).
 
-Hence the convention from `learnings/14`: `fn foo(messages: &[Message])` is more general than `fn foo(messages: &Vec<Message>)`. That's why cawir's `ask_claude` takes `&[Message]`, not `&Vec<Message>`.
+Hence the convention from `learnings-rust/14`: `fn foo(messages: &[Message])` is more general than `fn foo(messages: &Vec<Message>)`. That's why cawir's `ask_claude` takes `&[Message]`, not `&Vec<Message>`.
 
 ## The `vec!` macro
 
-A macro that constructs a `Vec<T>`. The trailing `!` is Rust's "this is a macro" indicator (see `learnings/03e-functions-and-macros.md` and `11-derive-macros.md`).
+A macro that constructs a `Vec<T>`. The trailing `!` is Rust's "this is a macro" indicator (see `learnings-rust/03e-functions-and-macros.md` and `11-derive-macros.md`).
 
 ```rust
 let v = vec![1, 2, 3];        // Vec<i32> with 3 elements
@@ -154,5 +154,5 @@ The iteration methods (`.iter()`, `.map()`, `.filter()`, `.collect()`) are entry
 
 ## See also
 
-- `learnings/05-ownership-and-borrowing.md` — `mut`, `&`, `&mut`, and the borrowing rules.
-- `learnings/14-function-parameters-and-ownership.md` — why `&[T]` is preferred over `&Vec<T>` in function parameters.
+- `learnings-rust/05-ownership-and-borrowing.md` — `mut`, `&`, `&mut`, and the borrowing rules.
+- `learnings-rust/14-function-parameters-and-ownership.md` — why `&[T]` is preferred over `&Vec<T>` in function parameters.

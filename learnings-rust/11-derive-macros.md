@@ -2,7 +2,7 @@
 
 `#[derive(Deserialize)]` and friends are one of the first "magical" Rust syntaxes you hit. Understanding what actually happens clears up a lot.
 
-**Terminology up front.** `Deserialize`, `Debug`, `Clone`, `Serialize` are **traits** — behavior contracts (see `learnings/06-traits-and-scope.md`). A derive *macro* of the same name exists for each, and its job is to generate an `impl TraitName for YourType` block at compile time. So in `#[derive(Deserialize, Debug)]`:
+**Terminology up front.** `Deserialize`, `Debug`, `Clone`, `Serialize` are **traits** — behavior contracts (see `learnings-rust/06-traits-and-scope.md`). A derive *macro* of the same name exists for each, and its job is to generate an `impl TraitName for YourType` block at compile time. So in `#[derive(Deserialize, Debug)]`:
 
 - The argument (`Deserialize`, `Debug`) is always a **trait name**.
 - The struct/enum it's attached to is a **type**.
