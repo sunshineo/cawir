@@ -5,7 +5,7 @@ mod tools;
 
 pub use error::{Error, Result};
 
-use std::io::{self, Write};
+use std::io::{self, ErrorKind, Write};
 
 use crate::{
     anthropic::{ClaudeResponse, ask_claude},
@@ -15,11 +15,8 @@ use crate::{
 const MAX_TOOL_ROUNDS: usize = 42;
 
 pub async fn run() -> Result<()> {
-    let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
-        Error::Env(
-            "ANTHROPIC_API_KEY env var not set. Get one from console.anthropic.com.".to_string(),
-        )
-    })?;
+    load_dotenv()?;
+    let api_key = anthropic_api_key()?;
 
     let client = reqwest::Client::builder().user_agent("cawir/0.1").build()?;
 
@@ -58,6 +55,23 @@ pub async fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn load_dotenv() -> Result<()> {
+    match dotenvy::dotenv() {
+        Ok(_) => Ok(()),
+        Err(dotenvy::Error::Io(error)) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Error::Env(format!("failed to load .env: {}", error))),
+    }
+}
+
+fn anthropic_api_key() -> Result<String> {
+    std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
+        Error::Env(
+            "ANTHROPIC_API_KEY env var not set. Add it to .env or get one from console.anthropic.com."
+                .to_string(),
+        )
+    })
 }
 
 async fn run_agent_turn(

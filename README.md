@@ -68,14 +68,17 @@ The target architecture is documented in [`docs/architecture.md`](docs/architect
 ## How to Run
 
 ### Prerequisites
-- Rust 1.56+ (installed via [rustup](https://rustup.rs))
+- Stable Rust installed via [rustup](https://rustup.rs)
 - An Anthropic API key from [console.anthropic.com](https://console.anthropic.com)
 
 ### Quickstart
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
 cargo run
 ```
+
+You can also export `ANTHROPIC_API_KEY` in your shell instead. Shell environment
+variables win over values from `.env`.
 
 Then type your questions:
 ```
