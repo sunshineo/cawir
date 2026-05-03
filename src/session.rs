@@ -88,3 +88,54 @@ impl Message {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn serializes_tool_result_message_for_anthropic() {
+        let message = Message::user_tool_result("toolu_123".to_string(), "Cargo.toml".to_string());
+        let serialized = serde_json::to_value(message).unwrap();
+
+        assert_eq!(
+            serialized,
+            json!({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_123",
+                        "content": "Cargo.toml"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn serializes_error_tool_result_message_for_anthropic() {
+        let message = Message::user_tool_results(vec![ToolResult {
+            tool_use_id: "toolu_123".to_string(),
+            content: "io error: No such file or directory".to_string(),
+            is_error: true,
+        }]);
+        let serialized = serde_json::to_value(message).unwrap();
+
+        assert_eq!(
+            serialized,
+            json!({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_123",
+                        "content": "io error: No such file or directory",
+                        "is_error": true
+                    }
+                ]
+            })
+        );
+    }
+}

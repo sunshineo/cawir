@@ -20,6 +20,37 @@ Cargo scans these locations automatically. No `Cargo.toml` entry needed for the 
 
 You can have both `src/main.rs` AND `src/lib.rs` in one crate — common when a binary reuses logic that's also exposed as a library. The binary can `use cawir::something;` to pull from the lib. (Covered in `03a-cargo-cli-and-crate-types.md`.)
 
+## cawir's current split: `main`, `lib`, `repl`, `agent`
+
+After Checkpoint 3.5, cawir has four important top-level files with separate jobs:
+
+| File | Scope |
+|---|---|
+| `src/main.rs` | Binary entry point. Installs the Tokio runtime with `#[tokio::main]`, calls `cawir::run().await`, and stays tiny. |
+| `src/lib.rs` | Library crate root. Declares modules and re-exports the public API, currently `cawir::run`, `cawir::Error`, `cawir::Result`, and `cawir::session`. |
+| `src/repl.rs` | Current Surface implementation. Handles `.env`, API key lookup, `reqwest::Client` setup, stdin/stdout, slash commands, and calling the agent for each non-command line. |
+| `src/agent.rs` | Core engine orchestration. Runs one user turn: calls the model, executes tools, appends tool results to history, and enforces the tool-loop cap. |
+
+The important Rust distinction:
+
+- `main.rs` exists because Cargo needs a binary target with a `main` function.
+- `lib.rs` exists because the reusable application code lives in the library crate named `cawir`.
+- `repl.rs` and `agent.rs` are ordinary modules declared by `lib.rs` with `mod repl;` and `mod agent;`.
+
+`lib.rs` re-exports the REPL entry point:
+
+```rust
+pub use repl::run;
+```
+
+That keeps `main.rs` stable:
+
+```rust
+cawir::run().await
+```
+
+The design reason is separation by responsibility. `repl.rs` is just one way to talk to the agent. A future TUI, stdio protocol, one-shot CLI command, or WebSocket server should be able to reuse `agent.rs`, `session.rs`, `tools.rs`, and provider code without copying the agent loop.
+
 ## Are these paths configurable?
 
 **Yes — but almost nobody changes them.** Each target type accepts a `path` field in `Cargo.toml`:

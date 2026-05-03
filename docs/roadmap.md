@@ -119,7 +119,7 @@ This is an organizational checkpoint, not an abstraction checkpoint. The goal is
 - **3.5c — Move agent loop to `agent.rs`**. Move `run_agent_turn`, `MAX_TOOL_ROUNDS`, and loop orchestration out of `lib.rs`. The agent loop calls the concrete Anthropic module and the concrete tools module. *Rust:* borrowing `&mut Vec<Message>` through orchestration, module boundaries around control flow.
     - *Iterates into:* CP5 streaming and CP7 hooks will change how the loop emits progress, but this step preserves the current request-tool-result loop.
 - **3.5d — Move REPL and slash commands to `repl.rs`**. Move `run`, `print_help`, startup setup, and the slash-command `match` out of `lib.rs`. Leave `/exit` and `/help` concrete. *Rust:* library exports, binary crate calling `cawir::run`, keeping surface code separate from engine code.
-    - *Iterates into:* `/mode` in CP4 will extend the concrete slash-command match before any command registry exists.
+    - *Iterates into:* `/mode` in CP4 will extend the concrete slash-command match before any command registry exists. Later Surface implementations can sit beside or replace `repl.rs`: a richer TUI, a one-shot `exec` command, stdio protocol mode, or a WebSocket server.
 
 Expected shape after 3.5:
 
@@ -134,6 +134,15 @@ src/
   agent.rs
   repl.rs
 ```
+
+Why this shape:
+
+- `main.rs` is the binary entry point: install the Tokio runtime, call `cawir::run()`, and stay tiny.
+- `lib.rs` is the crate root and public API: declare modules and re-export the small surface used by the binary.
+- `repl.rs` is the current Surface implementation: startup setup, line-based stdin/stdout, slash commands, and rendering.
+- `agent.rs` is Core engine orchestration: one user turn, model calls, tool calls, history mutation, and loop limits.
+
+The reason for this split is transport independence. `repl.rs` is only one way to talk to the agent. Future TUI, stdio, WebSocket, or one-shot CLI surfaces should reuse `agent.rs`, `session.rs`, `tools.rs`, and provider code instead of duplicating the agent loop.
 
 *Deferred:*
 - `Provider` trait → CP6, when OpenAI is added.
@@ -235,6 +244,16 @@ Components: Core engine, Surface.
 
 ## Beyond Checkpoint 9 (speculative)
 
-MCP tools · plugin loading · subagents · auto-mode classifier · context compaction · memory extraction · TUI upgrade ([Ratatui](https://ratatui.rs) + Crossterm) · remote transport.
+MCP tools · plugin loading · subagents · auto-mode classifier · context compaction · memory extraction.
 
-Each has a seam in [`architecture.md`](architecture.md). The TUI upgrade specifically is a Surface-layer swap: Ratatui consumer replaces the `println!`-based REPL, both consuming the same `Stream<AgentEvent>`. Agent loop and everything below stay identical.
+### Future surfaces and transports
+
+The current `repl.rs` is a plain line-based REPL, not a full terminal UI. Future Surface options:
+
+- **TUI** — rich terminal interface with panes, scrolling, status, and keybindings. Likely Ratatui + Crossterm. This should be a Surface-layer swap: the TUI consumes agent events and submits prompts, while the agent loop stays underneath.
+- **One-shot CLI** — `cawir exec "fix the tests"` style command. Arguments in, stdout/stderr out, process exits.
+- **Stdio protocol mode** — long-running headless process that reads structured messages from stdin and writes structured events/results to stdout. Useful for editor integrations, scripts, or MCP/LSP-style supervision.
+- **WebSocket server** — long-running network transport for a UI, daemon, or remote client. WebSocket is a transport: a persistent two-way pipe.
+- **JSON-RPC protocol** — optional message protocol for request/response methods and errors. JSON-RPC is a different layer from WebSocket: it can run over stdio, WebSocket, or HTTP.
+
+Each has a seam in [`architecture.md`](architecture.md). The principle is the same for all of them: Surface code changes, `agent.rs` and the core session/tool/provider logic should not.

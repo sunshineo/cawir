@@ -6,12 +6,12 @@ This document tracks the current implementation state and recent progress.
 - Checkpoint sequence and scope live in [`roadmap.md`](roadmap.md).
 - Target design and extension seams live in [`architecture.md`](architecture.md).
 
-## Snapshot (as of 2026-05-02)
+## Snapshot (as of 2026-05-03)
 
-- Current focus: **Checkpoint 3.5 — Refactor shape**.
-- Next sub-step: **3.5d — Move REPL and slash commands to `repl.rs`**.
-- Latest completed sub-step: **3.5c — Move agent loop to `agent.rs`**.
-- Planned next order: finish the last `lib.rs` split in `3.5d`, then move into Checkpoint 4 permission modes.
+- Current focus: **Checkpoint 4 — Modes**.
+- Next checkpoint: **4 — Modes**.
+- Latest completed sub-step: **3.5d — Move REPL and slash commands to `repl.rs`**.
+- Planned next order: add permission modes with `/mode`, starting from concrete enum state before any command registry.
 - Current user-visible behavior: one user prompt can trigger repeated `read_file`, `list_files`, approval-gated `write_file`, and approval-gated `shell` calls. cawir executes each tool request, sends matching `tool_result` blocks back to Claude, and continues until Claude returns a text answer or the 42-round tool-loop cap is reached. Tool execution failures and denied mutating actions are returned to Claude as error `tool_result` blocks instead of aborting the turn.
 
 ## Completed checkpoints
@@ -47,6 +47,7 @@ This document tracks the current implementation state and recent progress.
 - `3.5a` completed on 2026-05-01. Moved concrete Anthropic request/response structs, `ask_claude`, text rendering, and Anthropic API tests into `src/anthropic.rs`. `lib.rs` still owns the agent loop, REPL, and tools until later 3.5 sub-steps.
 - `3.5b` completed on 2026-05-01. Moved tool schemas, tool dispatch, tool execution, approval prompts, and tool tests into `src/tools.rs`. `lib.rs` now uses the concrete `tools::definitions()` and `tools::execute_tool_uses()` surface while the tool internals stay private.
 - `3.5c` completed on 2026-05-02. Moved `MAX_TOOL_ROUNDS`, `run_turn`, and the request-tool-result orchestration into `src/agent.rs`. `lib.rs` now keeps REPL/startup concerns and calls the concrete agent module for each non-command user turn.
+- `3.5d` completed on 2026-05-03. Moved `run`, startup setup, slash-command handling, and REPL rendering into `src/repl.rs`; `lib.rs` is now module declarations plus public exports. Moved remaining session serialization tests beside `Message` in `src/session.rs`.
 
 ## Learnings
 
