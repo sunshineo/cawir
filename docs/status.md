@@ -8,10 +8,10 @@ This document tracks the current implementation state and recent progress.
 
 ## Snapshot (as of 2026-05-03)
 
-- Current focus: **Checkpoint 4 — Modes**.
-- Next checkpoint: **4 — Modes**.
+- Current focus: **Checkpoint 4 — Providers, Auth, Config**.
+- Next checkpoint: **4 — Providers, Auth, Config**.
 - Latest completed sub-step: **3.5d — Move REPL and slash commands to `repl.rs`**.
-- Planned next order: add permission modes with `/mode`, starting from concrete enum state before any command registry.
+- Planned next order: add OpenAI and extract a concrete `Provider` boundary, then add provider selection, auth methods, credential lookup, Ollama, and provider config before moving to modes.
 - Current user-visible behavior: one user prompt can trigger repeated `read_file`, `list_files`, approval-gated `write_file`, and approval-gated `shell` calls. cawir executes each tool request, sends matching `tool_result` blocks back to Claude, and continues until Claude returns a text answer or the 42-round tool-loop cap is reached. Tool execution failures and denied mutating actions are returned to Claude as error `tool_result` blocks instead of aborting the turn.
 
 ## Completed checkpoints

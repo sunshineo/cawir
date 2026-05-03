@@ -17,13 +17,13 @@ Some sub-steps use simpler-than-final patterns so the Rust concept of the moment
 - **`ContentBlock` as a struct, not a tagged enum** (2c–2e). Only handles text blocks; will fail to deserialize tool_use blocks. Grows into a `#[serde(tag = "type")]` enum at **3b (Parse tool-use responses)**.
 - **Tool input schemas as raw `serde_json::Value`** (starting at 3a). First tool schemas are written as JSON literals with `json!` because that mirrors Anthropic's docs and keeps CP3 focused on the agent loop, not on designing a Rust model of JSON Schema. Flexible, but light on compile-time checking. If several tools make schema repetition or schema typos a real problem, extract small typed schema helpers from that concrete pressure rather than inventing a mini schema type system upfront.
 
-## Three phases, nine checkpoints
+## Three phases, fourteen checkpoints
 
 | Phase | Checkpoints |
 |---|---|
 | Foundation — not yet an agent | 1. Echo · 2. Chat |
-| The agent | 3. Agent loop ⭐ · 3.5. Refactor shape · 4. Modes |
-| Craft | 5. Streaming · 6. Multi-model · 7. Hooks · 8. Polyglot · 9. Resume |
+| The agent | 3. Agent loop ⭐ · 3.5. Refactor shape |
+| Craft and extension seams | 4. Providers/auth · 5. Modes · 6. Registries · 7. Resume · 8. Events · 9. Hooks/settings · 10. Streaming · 11. MCP · 12. Plugins · 13. Skills · 14. Surfaces |
 
 ---
 
@@ -32,13 +32,13 @@ Some sub-steps use simpler-than-final patterns so the Rust concept of the moment
 Minimal REPL with `/exit` and `/help`.
 
 - **1a — First read**. Prompt, read one line, echo, exit. *Rust:* `stdin`, `String`, `Result`, `?`, `print!`+`flush`.
-    - *Iterates into:* `print!`/`read_line` is a Surface-layer-only pattern. It swaps out for [Ratatui](https://ratatui.rs) + Crossterm widgets if/when we take the TUI-upgrade seam (post-CP9, speculative). The agent loop underneath is unaffected.
+    - *Iterates into:* `print!`/`read_line` is a Surface-layer-only pattern. It swaps out for [Ratatui](https://ratatui.rs) + Crossterm widgets if/when we take the TUI-upgrade seam at CP14. The agent loop underneath is unaffected.
 - **1b — Loop forever**. Wrap 1a in `loop`; exit on EOF. *Rust:* `loop`, `break`, EOF detection.
-    - *Iterates into:* The `loop { read stdin → dispatch }` shape stays largely unchanged through Chat (CP2) and Agent loop (CP3). At Hooks (CP7) the REPL becomes a `Stream<AgentEvent>` consumer and the loop shifts to event-driven (`while let Some(ev) = stream.next().await`). The outer stdin loop survives above that as a "read user input" pump.
+    - *Iterates into:* The `loop { read stdin → dispatch }` shape stays largely unchanged through Chat (CP2) and Agent loop (CP3). At Agent events (CP8) the REPL becomes a consumer of structured `AgentEvent`s and the loop shifts toward event-driven rendering. The outer stdin loop survives above that as a "read user input" pump.
 - **1c — Slash commands**. `/exit`, `/help`, else echo. *Rust:* `match` on `&str`, `trim`, `starts_with`.
-    - *Iterates into:* The hardcoded `match` extracts into a `Command` trait + `CommandRegistry` around CP6-7, when `/provider <name>` introduces the first slash command with an argument and hook-configured commands add the first dynamic source. Plugin-loaded commands come later (post-CP9 seam). Each current `match` arm maps one-to-one to a future registry entry — the refactor is a lift, not a rewrite.
+    - *Iterates into:* The hardcoded `match` extracts into a `Command` trait + `CommandRegistry` at CP6, after `/provider <name>` and `/mode <name>` create concrete argument-parsing pressure. Plugin-loaded commands come later at CP12-13. Each current `match` arm maps one-to-one to a future registry entry — the refactor is a lift, not a rewrite.
 
-*Deferred:* `Command` trait + `CommandRegistry` → ~CP6-7 (when `/provider` adds arguments and hook-registered commands add a dynamic source). Plugin-loaded commands → post-CP9. Write the 1c match so each arm is one refactor from a registry lookup.
+*Deferred:* `Command` trait + `CommandRegistry` → CP6. Plugin-loaded commands → CP12-13. Write the 1c match so each arm is one refactor from a registry lookup.
 
 Components: Surface.
 
@@ -52,15 +52,15 @@ Multi-turn conversation with Claude. Biggest Rust jump — seven sub-steps.
 - **2a-ii — First HTTP call**. Add `reqwest`; fetch a plain-text endpoint (e.g. `api.github.com/zen`) and print it before the REPL loop. Change main's return to `Result<(), Box<dyn Error>>` so `?` can propagate both `io::Error` and `reqwest::Error`. Used `reqwest::Client::builder()` (rather than the simpler `reqwest::get`) so we could set a `User-Agent` header — GitHub's API requires it. *Rust:* the builder pattern, `reqwest::Client`, `.send().await? → .text().await?` chained, `Box<dyn Error>` as a catch-all type-erased error, automatic error conversion via the `From` trait.
     - *Iterates into:* The GitHub Zen demo call gets removed when the first Claude call lands at 2c — replaced, not extended. The `reqwest::Client::builder()` pattern stays (we'll set `Authorization` and other headers the same way for Anthropic). `Box<dyn Error>` persists as a pragmatic stepping stone until 2f, where a `thiserror` enum takes over.
 - **2b — Parse JSON**. Fetch `https://api.github.com/repos/rust-lang/rust`, deserialize into a `Repo` struct via `#[derive(Deserialize)]`, print selected fields (name, description, stars, issues, forks). *Rust:* `#[derive(Deserialize)]` with `serde`, `reqwest::Response::json().await?`, `Option<T>` for nullable JSON fields.
-    - *Iterates into:* The GitHub repo demo is replaced at 2c when Claude API request/response types take over. The `#[derive(Deserialize)]` pattern persists — reused in every checkpoint from 2c onward, and again at CP5 for stream events (smaller enum variants tagged by a `type` field, one per SSE event, instead of one big response struct).
+    - *Iterates into:* The GitHub repo demo is replaced at 2c when Claude API request/response types take over. The `#[derive(Deserialize)]` pattern persists — reused in every checkpoint from 2c onward, and again at CP10 for stream events (smaller enum variants tagged by a `type` field, one per SSE event, instead of one big response struct).
 - **2c — First Claude call**. Hard-coded "hello" POST. cawir reads `ANTHROPIC_API_KEY` from env, builds a `MessageRequest` with the Claude model + a single user `Message`, sends it with `x-api-key` / `anthropic-version` / `content-type` headers, parses the response into `MessageResponse` with `Vec<ContentBlock>`, prints the first block's text. Status check before parsing so 401s give a clear error message instead of a confusing serde failure. *Rust:* `#[derive(Serialize)]`, custom HTTP headers, `std::env::var`, `if let Some(...)`, status-then-body error handling.
     - *Iterates into:* The hard-coded "hello" prompt is replaced by user input at **2d (Wire with REPL)**, where each line becomes a Claude call and `?`-everywhere fail-fast becomes per-call match. Single-shot becomes multi-turn at **2e** with `Vec<Message>` accumulating across turns. The request grows a first concrete tool at **3a (First tool advertised)**, and the simple `ContentBlock { text: String }` grows into a `#[serde(tag = "type")]` enum at **3b (Parse tool-use responses)**. `Box<dyn Error>` becomes a `thiserror` enum at **2f**.
 - **2d — Wire with REPL**. Replace the hard-coded "hello" with user input from the REPL. Each non-`/command` line goes to Claude as a one-shot prompt; the reply prints; no history yet. Extract the Claude call into `async fn ask_claude(&Client, &str, &str) -> Result<String, _>`. The call site uses `match` instead of `?` — a network blip or 401 prints to stderr but the REPL keeps running. *Rust:* function extraction with `&` parameters, `async fn` returning `Result`, the fail-fast → graceful transition for runtime errors (setup-time still uses `?`), `eprintln!` for stderr.
-    - *Iterates into:* `ask_claude` becomes a method on the `Provider` trait at **CP6 (Multi-model)** once we have a second concrete impl (OpenAI) to extract from. The single-turn no-history behavior becomes multi-turn at **2e** with `Vec<Message>` accumulating across loop iterations. Hardcoded model name and `max_tokens` move to config later, when there is real provider/settings pressure.
+    - *Iterates into:* `ask_claude` becomes a method on the `Provider` trait at **CP4 (Providers/auth)** once we have a second concrete impl (OpenAI) to extract from. The single-turn no-history behavior becomes multi-turn at **2e** with `Vec<Message>` accumulating across loop iterations. Hardcoded model name and `max_tokens` move to config when provider/settings pressure arrives.
 - **2e — Multi-turn**. `history: Vec<Message>` accumulates across loop iterations; the full history ships in every API call so Claude has context. Push the user message before the call, and pop it if the call fails (Anthropic rejects two consecutive user turns, so history must stay clean on errors). *Rust:* `Vec<T>` mutation patterns (`push`, `pop`), `Vec::new()` vs `vec![]`, slice parameters (`&[Message]` instead of `&Vec<Message>`), `Clone` derive, `.to_vec()` to clone a slice into an owned `Vec`.
-    - *Iterates into:* The history is in-memory only; persists across `/exit` + restart at **CP9 (Resume)** by serializing `Vec<Message>` to disk. `Message`'s `content: String` gets enriched at **3e (Send one tool result back)** — once assistant tool-use blocks and tool results land, content can't flatten to a string anymore. The unbounded growth of `history` will eventually need compaction (currently a "Beyond CP9" speculative seam in the architecture).
+    - *Iterates into:* The history is in-memory only; persists across `/exit` + restart at **CP7 (Resume)** by serializing session data to disk. `Message`'s `content: String` gets enriched at **3e (Send one tool result back)** — once assistant tool-use blocks and tool results land, content can't flatten to a string anymore. The unbounded growth of `history` will eventually need compaction (currently a "Beyond CP14" speculative seam in the architecture).
 - **2f — Cleanup**. Split the one-file prototype into `main.rs` + `lib.rs` + `session.rs` + `error.rs`; add `thiserror`; replace `Box<dyn Error>` with a typed app error enum and project `Result<T>` alias. Add `AGENTS.md -> CLAUDE.md` so Codex reads the same project guidance. *Rust:* binary vs library crates, `mod`, `pub`, `pub use`, type aliases, `#[derive(thiserror::Error)]`, `#[error(...)]`, `#[from]`, `std::convert::From`, how `?` converts errors, the Rust prelude (`Debug`, `From`).
-    - *Iterates into:* `Message` now lives in `session.rs` as pure conversation data, ready to grow toward CP9 persistence. `ask_claude` remains a concrete Anthropic function; it becomes a provider method only after a second provider creates Rule-of-Three pressure at **CP6 (Multi-model)**. The error enum can now gain variants as CP3 introduces file IO, shell execution, tool dispatch, and permission failures.
+    - *Iterates into:* `Message` now lives in `session.rs` as pure conversation data, ready to grow toward CP7 persistence. `ask_claude` remains a concrete Anthropic function; it becomes a provider method only after a second provider creates Rule-of-Three pressure at **CP4 (Providers/auth)**. The error enum can now gain variants as CP3 introduces file IO, shell execution, tool dispatch, and permission failures.
 
 Components: Surface, Core engine (minimal), External (hard-coded Anthropic call, no `Provider` trait yet).
 
@@ -71,32 +71,32 @@ Components: Surface, Core engine (minimal), External (hard-coded Anthropic call,
 The soul of cawir. cawir stops being "chat with Claude" and becomes a real coding agent: first by advertising one concrete tool, then by handling `tool_use`, then by executing approved local actions, and only then by looping until Claude stops.
 
 - **3a — First tool advertised**. Add a single concrete tool, `read_file`, to the Anthropic request so Claude can reach for a real tool instead of only answering in text. This step is allowed to expose the next failure mode: if Claude emits `tool_use`, the old parser may break, and **3b** fixes that. *Rust:* extending request structs, `serde_json::Value`, the `json!` macro, hand-built JSON schema data.
-    - *Iterates into:* The first tool stays concrete and inline. Its schema is allowed to be raw `serde_json::Value` at first because that mirrors the provider docs directly. If several tools make that too repetitive or too typo-prone, extract small typed schema helpers from the concrete repetition. The tool definition only extracts into a `Tool` trait + registry at **CP6-7**, once there is real pressure from multiple concrete tools and providers.
+    - *Iterates into:* The first tool stays concrete and inline. Its schema is allowed to be raw `serde_json::Value` at first because that mirrors the provider docs directly. If several tools make that too repetitive or too typo-prone, extract small typed schema helpers from the concrete repetition. The tool definition extracts into a `Tool` trait + registry at **CP6**, once there is concrete pressure from multiple tools and future external tool sources.
 - **3b — Parse tool-use responses**. Replace the text-only `ContentBlock` parsing with a tagged enum that handles both `text` and `tool_use`. cawir can now receive a tool request without deserialization failure. *Rust:* `#[serde(tag = "type")]`, data-carrying enums, `match` on enum variants.
-    - *Iterates into:* The same tagged-enum deserialization pattern comes back at **CP5 (Streaming)**, where SSE events also arrive as smaller typed variants keyed by a `type` field.
+    - *Iterates into:* The same tagged-enum deserialization pattern comes back at **CP10 (Streaming)**, where SSE events also arrive as smaller typed variants keyed by a `type` field.
 - **3c — Execute one read-only tool call**. Match on a parsed `read_file` tool call, extract its `path`, run the local file read, and surface the raw result. *Rust:* `serde_json::Value`, simple input extraction, `std::fs::read_to_string`, `match` dispatch.
     - *Iterates into:* The plain `match` dispatcher is deliberate. Each arm should already look like the future trait method signature, but no `Tool` trait or registry is extracted yet.
 - **3d — Second read-only tool: list_files**. Add `list_files` so Claude can inspect repository or folder structure before choosing files to read. Match on a parsed `list_files` tool call, extract its `path`, run a directory listing, and surface the raw result. *Rust:* `std::fs::read_dir`, `DirEntry`, collecting and formatting owned `String` output.
     - *Iterates into:* This stays concrete and inline beside `read_file`. Together they make the read-only inspection path more useful before any approval system exists, while still keeping dispatch as a plain `match`.
 - **3e — Send one tool result back**. Enrich session or message data enough to store assistant tool-use content and a `tool_result`, then send the `read_file` or `list_files` result back and print Claude's follow-up answer. *Rust:* richer serde enums or structs for conversation state, owned `Vec` data, cloning and ownership across request assembly.
-    - *Iterates into:* This is the moment `Message` stops flattening to plain text. The same "session is pure serde data" discipline later pays off at **CP9 (Resume)**.
+    - *Iterates into:* This is the moment `Message` stops flattening to plain text. The same "session is pure serde data" discipline later pays off at **CP7 (Resume)**.
 - **3f — Repeat until Claude stops**. Turn the one-shot call-execute-feedback flow into the real read-only agent loop: keep executing `read_file` and `list_files` calls until Claude returns a normal stop. *Rust:* loop control, stop conditions, repeated request or response cycles.
-    - *Iterates into:* The control-flow shape here is the foundation for later streaming and event emission. CP5 and CP7 change how the loop surfaces work, not the fact that the loop owns orchestration.
+    - *Iterates into:* The control-flow shape here is the foundation for later event emission and streaming. CP8 and CP10 change how the loop surfaces work, not the fact that the loop owns orchestration.
 - **3g — Tool failures become tool results**. Missing files and invalid tool inputs are returned to Claude as tool errors instead of crashing or corrupting session history. *Rust:* error-to-data conversion, keeping state consistent after partial failure.
-    - *Iterates into:* CP4 adds policy errors with structure; CP7 adds hook-driven denial. CP3 only needs the simpler rule that a tool failure should stay inside the conversation, not tear down the session.
+    - *Iterates into:* CP5 adds policy errors with structure; CP9 adds hook-driven denial. CP3 only needs the simpler rule that a tool failure should stay inside the conversation, not tear down the session.
 - **3h — First mutating tool: write_file with inline approval**. Add `write_file`, but gate it with a direct REPL approval prompt before execution. Denials and write failures flow back through the tool-result path from 3g. *Rust:* `std::fs::write`, inline approval flow, distinguishing denial from execution failure.
-    - *Iterates into:* The approval check is intentionally hardcoded here so mutating tools can land safely before the real policy system. `PermissionMode` still starts at **CP4 (Modes)**.
+    - *Iterates into:* The approval check is intentionally hardcoded here so mutating tools can land safely before the real policy system. `PermissionMode` starts at **CP5 (Modes)**.
 - **3i — Second mutating tool: shell with inline approval**. Add `shell`, also behind direct approval, and return stdout, stderr, denial, or execution failure into the tool-result path. *Rust:* `std::process::Command`, exit-status handling, stdout or stderr capture.
-    - *Iterates into:* Shell approval remains a local REPL concern in CP3. Finer-grained policy and hook-based vetoes still wait for **CP4** and **CP7**.
+    - *Iterates into:* Shell approval remains a local REPL concern in CP3. Finer-grained policy and hook-based vetoes still wait for **CP5** and **CP9**.
 
 *Deferred:*
-- `Tool` trait + `ToolRegistry` → ~CP6-7 (Rule of Three with concrete pressure)
-- `PermissionMode` enum + `/mode` → CP4
-- Plan mode + `ExitPlanMode` → CP4
-- Multi-source tool registration (plugins/MCP) → post-CP9
-- Tool-output budgeting → later CP4 cleanup. Add file-size caps or ranged reads so one `read_file` cannot inject a huge file into history by default. Add stdout/stderr byte or line caps for `shell`, with clear truncation markers; Checkpoint 3i currently decodes process output into one lossy UTF-8 string for simplicity.
-- Rate-limit recovery → later External cleanup. Parse 429 `retry-after` / rate-limit headers and decide whether to wait, retry, or return a clearer recoverable error.
-- Cache observability → later External cleanup. Parse Anthropic `usage` fields such as `input_tokens`, `cache_creation_input_tokens`, and `cache_read_input_tokens` so cache behavior is visible while learning.
+- `Tool` trait + `ToolRegistry` → CP6
+- `PermissionMode` enum + `/mode` → CP5
+- Plan mode + `ExitPlanMode` → CP5
+- Multi-source tool registration → CP11-13
+- Tool-output budgeting → early cleanup around CP5-6. Add file-size caps or ranged reads so one `read_file` cannot inject a huge file into history by default. Add stdout/stderr byte or line caps for `shell`, with clear truncation markers; Checkpoint 3i currently decodes process output into one lossy UTF-8 string for simplicity.
+- Rate-limit recovery → CP4 provider cleanup. Parse 429 `retry-after` / rate-limit headers and decide whether to wait, retry, or return a clearer recoverable error.
+- Cache observability → CP4 provider cleanup. Parse provider usage fields such as Anthropic `input_tokens`, `cache_creation_input_tokens`, and `cache_read_input_tokens` so cache behavior is visible while learning.
 
 Write dispatch so each arm is already the future trait method's signature.
 
@@ -113,13 +113,13 @@ Checkpoint 3 made cawir a real agent, but `lib.rs` now owns too many responsibil
 This is an organizational checkpoint, not an abstraction checkpoint. The goal is clearer modules, not a provider trait, tool trait, command registry, plugin system, or config system.
 
 - **3.5a — Move Anthropic API code to `anthropic.rs`**. Move request/response structs and the concrete `ask_claude` call out of `lib.rs`. Keep the implementation Anthropic-specific. *Rust:* `pub(crate)` visibility, module imports, separating wire protocol code from orchestration.
-    - *Iterates into:* A future `Provider` trait still waits until CP6 when OpenAI adds real extraction pressure. This step only gives the concrete Anthropic code a home.
+    - *Iterates into:* A future `Provider` trait still waits until CP4 when OpenAI adds real extraction pressure. This step only gives the concrete Anthropic code a home.
 - **3.5b — Move tools to `tools.rs`**. Move tool schemas, tool dispatch, tool execution, approval prompts, and tool tests out of `lib.rs`. Add a small concrete `definitions() -> Vec<ToolDefinition>` and `execute_tool_uses(...)` surface, but keep dispatch as a plain `match`. *Rust:* private helpers inside a module, public module functions, tests living beside the code they exercise.
-    - *Iterates into:* A `Tool` trait + registry still waits until CP6-7. This step makes the current match registry-shaped without introducing dynamic dispatch. `execute_tool_uses(...)` is allowed to be a slightly orchestration-heavy boundary for now because it keeps the 3.5b call site simple. When the agent loop and event handling grow, expect it to split: `tools.rs` keeps the low-level "execute one named tool with JSON input" responsibility, while `agent.rs` owns turning model `tool_use` blocks into events, tool results, and session updates.
+    - *Iterates into:* A `Tool` trait + registry still waits until CP6. This step makes the current match registry-shaped without introducing dynamic dispatch. `execute_tool_uses(...)` is allowed to be a slightly orchestration-heavy boundary for now because it keeps the 3.5b call site simple. When the agent loop and event handling grow, expect it to split: `tools.rs` keeps the low-level "execute one named tool with JSON input" responsibility, while `agent.rs` owns turning model `tool_use` blocks into events, tool results, and session updates.
 - **3.5c — Move agent loop to `agent.rs`**. Move `run_agent_turn`, `MAX_TOOL_ROUNDS`, and loop orchestration out of `lib.rs`. The agent loop calls the concrete Anthropic module and the concrete tools module. *Rust:* borrowing `&mut Vec<Message>` through orchestration, module boundaries around control flow.
-    - *Iterates into:* CP5 streaming and CP7 hooks will change how the loop emits progress, but this step preserves the current request-tool-result loop.
+    - *Iterates into:* CP8 events, CP9 hooks, and CP10 streaming will change how the loop emits progress, but this step preserves the current request-tool-result loop.
 - **3.5d — Move REPL and slash commands to `repl.rs`**. Move `run`, `print_help`, startup setup, and the slash-command `match` out of `lib.rs`. Leave `/exit` and `/help` concrete. *Rust:* library exports, binary crate calling `cawir::run`, keeping surface code separate from engine code.
-    - *Iterates into:* `/mode` in CP4 will extend the concrete slash-command match before any command registry exists. Later Surface implementations can sit beside or replace `repl.rs`: a richer TUI, a one-shot `exec` command, stdio protocol mode, or a WebSocket server.
+    - *Iterates into:* `/provider` in CP4 and `/mode` in CP5 will extend the concrete slash-command match before any command registry exists. Later Surface implementations can sit beside or replace `repl.rs`: a richer TUI, a one-shot `exec` command, stdio protocol mode, or a WebSocket server.
 
 Expected shape after 3.5:
 
@@ -145,10 +145,10 @@ Why this shape:
 The reason for this split is transport independence. `repl.rs` is only one way to talk to the agent. Future TUI, stdio, WebSocket, or one-shot CLI surfaces should reuse `agent.rs`, `session.rs`, `tools.rs`, and provider code instead of duplicating the agent loop.
 
 *Deferred:*
-- `Provider` trait → CP6, when OpenAI is added.
-- `Tool` trait + registry → CP6-7, when provider/tool registration pressure is real.
-- `Command` trait + registry → CP6-7, when `/provider <name>` adds arguments and hook-configured commands add a dynamic source.
-- `PermissionMode` enum + `/mode` → CP4.
+- `Provider` trait → CP4, when OpenAI is added.
+- `Tool` trait + registry → CP6, when registration pressure is real.
+- `Command` trait + registry → CP6, after `/provider <name>` and `/mode <name>` add arguments.
+- `PermissionMode` enum + `/mode` → CP5.
 
 Done when: `lib.rs` is mostly module declarations and public exports; behavior is unchanged; tests live beside the modules they exercise; `cargo fmt --check`, `cargo test`, and `cargo clippy --all-targets -- -D warnings` pass after each sub-step.
 
@@ -156,75 +156,216 @@ Components: Core engine, Surface, External.
 
 ---
 
-## 4 — Modes
+## Remaining checkpoint order
 
-`PermissionMode` enum + `/mode <name>`. Plan mode: Claude researches read-only, calls `ExitPlanMode`, REPL prompts for approval.
+The rest of the roadmap is ordered by dependency, not by feature excitement:
 
-*Rust:* `enum` as state machine, exhaustive `match`, event-emitting tools (not-mutating).
+```text
+4 Providers/auth
+5 Modes
+6 Registries
+7 Resume
+8 Agent events
+9 Hooks/settings
+10 Streaming
+11 MCP
+12 Plugins
+13 Skills
+14 Alternate surfaces
+```
 
-Done when: `/mode plan` restricts writes; `exit_plan_mode` approval flow works; `/mode default` / `/mode bypass` work.
+Reasoning:
 
-Components: Policy.
-
----
-
-## 5 — Streaming
-
-Claude's output appears token-by-token via SSE.
-
-*Rust:* `futures::Stream`, `StreamExt`, SSE parsing, partial-JSON handling.
-
-Done when: responses stream visibly; tool calls still work mid-stream.
-
-Components: External, Core engine.
-
----
-
-## 6 — Multi-model
-
-Add OpenAI. Extract `Provider` trait from two concrete impls. Natural moment to also extract `Tool` trait from CP3's three functions.
-
-*Rust:* **extracting a trait from two impls**, static vs dynamic dispatch, default trait methods.
-
-Done when: `/provider openai` and `/provider anthropic` both work.
-
-Components: External.
+- Provider/auth comes first because the code is still Anthropic-shaped; everything later should depend on a model boundary, not on `ask_claude`.
+- Modes come before tool registries so the existing inline approval path becomes a real policy state machine.
+- Registries come before MCP/plugins/skills because those are capability sources; they need somewhere to register tools, commands, and context.
+- Resume comes before events/hooks/streaming because it forces a clean split between durable `Session` data and non-serializable runtime handles.
+- Events come before hooks, streaming, and alternate surfaces because all three need the same lifecycle vocabulary.
 
 ---
 
-## 7 — Hooks
+## 4 — Providers, Auth, Config
 
-Event bus. Agent loop emits `AgentEvent`s; `HookRegistry` dispatches to handlers loaded from `settings.json`. Demo: `cargo fmt` after `write_file` on `.rs`.
+Move from hard-coded Anthropic to selectable providers with explicit credential handling.
 
-*Rust:* `Arc<Mutex<T>>` or `tokio::sync::RwLock`, channels, async dispatch, settings.json merge (user → project → local).
+Sub-steps:
 
-Done when: configured hook fires; `PreToolUse::Deny` blocks a tool.
+- **4a — Add OpenAI and extract `Provider`**. Keep Anthropic concrete, add OpenAI concrete, then extract the shared provider shape from the two implementations. *Rust:* traits extracted from real duplication, associated data, static vs dynamic dispatch choices.
+- **4b — `/provider <name>`**. Add the first slash command with an argument using the existing concrete match. No command registry yet. *Rust:* parsing command arguments with `split_whitespace`, returning user-facing errors without panicking.
+- **4c — `AuthMethod` and credential chain**. Split wire format from credential attachment. Implement `ApiKey`, `CodexOAuth` for OpenAI, `None`, and lookup order Keychain → environment → `.env`. *Rust:* trait composition, enums for auth kinds, crate choice for `keyring` and `directories`.
+- **4d — Add Ollama**. Local no-auth provider to pressure-test `Provider` + `AuthMethod` without another cloud credential. *Rust:* provider-specific request/response structs behind one trait.
+- **4e — Provider config**. Remember last-used provider at the OS-appropriate config path. First launch chooses the first provider with usable credentials.
 
-Components: Core engine, Capabilities, External (SettingsResolver arrives).
+Done when: Anthropic, OpenAI, and Ollama can be selected; credential lookup is explicit; `agent.rs` calls a provider boundary instead of `ask_claude`; `/provider anthropic|openai|ollama` works.
 
----
-
-## 8 — Polyglot
-
-Add Ollama. `AuthMethod` trait orthogonal to `Provider`. Credential chain: Keychain → env → `.env`.
-
-*Rust:* second orthogonal trait composing with Provider, `keyring`, `dotenvy`.
-
-Done when: Ollama works with no credentials; OpenAI works from env or Keychain; mid-session provider switching works.
-
-Components: External.
+Components: External, Surface.
 
 ---
 
-## 9 — Resume
+## 5 — Modes And Plan Mode
 
-`cawir --resume <id>` and `cawir --continue`.
+Replace inline approval-only behavior with explicit permission modes.
 
-*Rust:* serde to/from disk, `clap`, `directories` crate, filesystem basics.
+Sub-steps:
 
-Done when: a conversation survives `/exit` + restart.
+- **5a — `PermissionMode` enum**. Add `Default`, `Plan`, `AcceptEdits`, and `Bypass`. Start in `Default`. *Rust:* enum as state machine, exhaustive `match`.
+- **5b — `/mode <name>`**. Add mode switching in the concrete slash-command match. No command registry yet.
+- **5c — Mode-aware tools**. Thread the current mode into tool execution. `Default` asks on mutating tools, `AcceptEdits` auto-approves writes but still asks on shell, `Bypass` allows everything.
+- **5d — Plan mode**. In `Plan`, mutating tools are denied as tool results. Add a concrete `exit_plan_mode` tool that returns a proposed plan upward for REPL approval before switching modes.
+
+Done when: `/mode default`, `/mode plan`, `/mode accept-edits`, and `/mode bypass` work; plan mode blocks mutation; `exit_plan_mode` produces an approval prompt; approved plans can continue.
+
+Components: Policy, Surface, Core engine.
+
+---
+
+## 6 — Tool And Slash-Command Registries
+
+Create the registration points needed before MCP, plugins, skills, and more slash commands.
+
+Sub-steps:
+
+- **6a — `Tool` trait and `ToolRegistry`**. Move the current tool `match` into named concrete tool implementations registered at startup. *Rust:* trait objects, `Box` or `Arc`, object safety.
+- **6b — Tool metadata**. Keep tool name, description, input schema, mutating/read-only classification, and execution in one place.
+- **6c — `Command` trait and `CommandRegistry`**. Move `/exit`, `/help`, `/provider`, and `/mode` into a simple registry after they have real argument pressure.
+- **6d — Keep built-ins concrete**. Built-in tools and commands still register directly in Rust code. External population waits for MCP/plugins/skills.
+
+Done when: adding a built-in tool or slash command no longer requires editing a central dispatch `match`; behavior is unchanged.
+
+Components: Capabilities, Surface.
+
+---
+
+## 7 — Sessions And Resume
+
+Persist conversations and make runtime state separate from durable session data.
+
+Sub-steps:
+
+- **7a — `Session` struct**. Wrap message history in a serializable `Session { id, messages, provider, mode, ... }`.
+- **7b — Runtime struct**. Move non-serializable handles such as HTTP client, provider registry, tool registry, and command registry into `Runtime`.
+- **7c — Session storage**. Use `directories` to find an OS-appropriate data path. Save sessions as JSON.
+- **7d — CLI args**. Add `clap` for `cawir --resume <id>` and `cawir --continue`.
+
+Done when: a conversation survives `/exit` + restart; `--continue` opens the most recent session; `--resume <id>` opens a specific session.
+
+Components: Core engine, Surface, External.
+
+---
+
+## 8 — Agent Events
+
+Introduce a typed event vocabulary between the agent loop and whatever is rendering or observing it.
+
+Sub-steps:
+
+- **8a — `AgentEvent` enum**. Start with `UserPromptSubmit`, `ModelRequestStart`, `ToolUseRequested`, `ToolUseFinished`, `AssistantText`, `Stop`, and `StopFailure`.
+- **8b — Emit events from `agent.rs`**. Preserve current terminal output at first by rendering events in `repl.rs`.
+- **8c — Event-aware tool results**. Keep tool results as session data, but make progress and display a separate event stream.
+
+Done when: `repl.rs` renders agent progress from typed events instead of ad hoc `println!` calls inside the core loop.
 
 Components: Core engine, Surface.
+
+---
+
+## 9 — Hooks And Settings
+
+Let configured handlers observe, modify, or deny work at event points.
+
+Sub-steps:
+
+- **9a — `SettingsResolver`**. Load settings from user, project, and local files in a deterministic merge order.
+- **9b — `HookRegistry`**. Register handlers by event kind.
+- **9c — Command hooks**. Run configured commands with event JSON on stdin; parse allow/deny/modify actions from exit status and stdout.
+- **9d — Pre-tool denial**. Demonstrate a hook denying a tool before execution.
+- **9e — Post-write hook demo**. Example: run `cargo fmt` after `write_file` on `.rs`.
+
+Done when: a configured hook fires; `PreToolUse::Deny` blocks a tool; a post-write hook can format Rust files.
+
+Components: Core engine, Capabilities, External.
+
+---
+
+## 10 — Streaming
+
+Stream provider output and tool-use deltas through the event system.
+
+Sub-steps:
+
+- **10a — Anthropic SSE**. Parse streaming events into typed provider events.
+- **10b — OpenAI streaming**. Map OpenAI stream chunks into the same provider-neutral event shape.
+- **10c — Agent integration**. Preserve tool calls and tool results while text streams.
+- **10d — REPL rendering**. Render partial assistant text without corrupting approval prompts or tool progress.
+
+Done when: assistant text appears token-by-token; tool calls still work during streamed turns.
+
+Components: External, Core engine, Surface.
+
+---
+
+## 11 — MCP Tools
+
+Add MCP as an external source of tools.
+
+Sub-steps:
+
+- **11a — MCP client process management**. Start and stop configured MCP servers.
+- **11b — Tool discovery**. Convert MCP tool metadata into `ToolRegistry` entries.
+- **11c — Tool invocation**. Dispatch model-requested MCP tools through the same permission and event path as built-ins.
+
+Done when: a configured MCP server contributes at least one callable tool and tool results flow through the normal agent loop.
+
+Components: Capabilities, External.
+
+---
+
+## 12 — Plugins
+
+Add local plugin packages as a structured source of commands, tools, hooks, and settings.
+
+Sub-steps:
+
+- **12a — Plugin manifest**. Define a minimal plugin metadata file.
+- **12b — Plugin discovery**. Load plugins from configured directories.
+- **12c — Plugin contributions**. Allow plugins to register built-in-style commands, external command tools, hooks, and settings snippets.
+
+Done when: a local plugin can add one slash command and one external command-backed tool without code changes in core modules.
+
+Components: Capabilities, External, Surface.
+
+---
+
+## 13 — Skills
+
+Add reusable instruction/context bundles that can teach the agent specialized workflows.
+
+Sub-steps:
+
+- **13a — Skill format**. Define a small local skill format with name, description, trigger guidance, and instruction body.
+- **13b — Skill loading**. Load skills from configured directories and plugin-provided skill folders.
+- **13c — Skill activation**. Add selected skill instructions to prompt assembly when the user names a skill or trigger guidance matches.
+
+Done when: a skill can add durable workflow guidance without changing Rust code, and active skills are visible in prompt assembly/debug output.
+
+Components: Capabilities, Core engine, External.
+
+---
+
+## 14 — Alternate Surfaces
+
+Add new ways to talk to the same agent engine.
+
+Sub-steps:
+
+- **14a — One-shot CLI**. `cawir exec "..."` runs one prompt headlessly and exits.
+- **14b — Stdio protocol mode**. Long-running process reads structured messages from stdin and writes structured events/results to stdout.
+- **14c — TUI**. Rich terminal UI with panes, scrolling, status, and keybindings. Likely Ratatui + Crossterm.
+- **14d — WebSocket / JSON-RPC server**. WebSocket is the transport; JSON-RPC is an optional request/response protocol that can run over WebSocket, stdio, or HTTP.
+
+Done when: at least one non-REPL surface can drive the same `agent.rs` core without duplicating the agent loop.
+
+Components: Surface.
 
 ---
 
@@ -235,25 +376,20 @@ Components: Core engine, Surface.
 | 1 | Echo | `String`/`&str`, `stdin`, `Result`, `?`, `loop`, `match` |
 | 2 | Chat | crates, `async`/`await`, serde derive, `Vec`, structs/enums, modules, `thiserror`, env vars |
 | 3 | Agent loop | agent-loop protocol, `serde_json::Value`, `std::fs`, `Command`, match dispatch |
-| 4 | Modes | `enum` state machine, exhaustive match, special tools |
-| 5 | Streaming | `futures::Stream`, SSE parsing, partial JSON |
-| 6 | Multi-model | **extracting a trait**, static vs dynamic dispatch |
-| 7 | Hooks | `Arc`/`Mutex`, channels, async dispatch, JSON merge |
-| 8 | Polyglot | orthogonal trait, `keyring`, `dotenvy` |
-| 9 | Resume | serde disk I/O, `clap`, `directories` |
+| 4 | Providers/auth | traits from real duplication, trait composition, config paths |
+| 5 | Modes | enum state machine, exhaustive match, policy as data |
+| 6 | Registries | trait objects, object safety, `Box`/`Arc` |
+| 7 | Resume | serde disk I/O, `clap`, `directories`, runtime vs durable data |
+| 8 | Agent events | event enums, producer/consumer boundaries |
+| 9 | Hooks/settings | settings merge, process IO, sync decision points |
+| 10 | Streaming | `futures::Stream`, SSE parsing, partial JSON |
+| 11 | MCP | external protocol clients, process lifecycle |
+| 12 | Plugins | manifest parsing, contribution registration |
+| 13 | Skills | prompt assembly, dynamic context selection |
+| 14 | Surfaces | transport boundaries, stdio/WebSocket protocol layering |
 
-## Beyond Checkpoint 9 (speculative)
+## Beyond Checkpoint 14 (speculative)
 
-MCP tools · plugin loading · subagents · auto-mode classifier · context compaction · memory extraction.
+Subagents · auto-mode classifier · context compaction · memory extraction · richer TUI polish · remote daemon deployment.
 
-### Future surfaces and transports
-
-The current `repl.rs` is a plain line-based REPL, not a full terminal UI. Future Surface options:
-
-- **TUI** — rich terminal interface with panes, scrolling, status, and keybindings. Likely Ratatui + Crossterm. This should be a Surface-layer swap: the TUI consumes agent events and submits prompts, while the agent loop stays underneath.
-- **One-shot CLI** — `cawir exec "fix the tests"` style command. Arguments in, stdout/stderr out, process exits.
-- **Stdio protocol mode** — long-running headless process that reads structured messages from stdin and writes structured events/results to stdout. Useful for editor integrations, scripts, or MCP/LSP-style supervision.
-- **WebSocket server** — long-running network transport for a UI, daemon, or remote client. WebSocket is a transport: a persistent two-way pipe.
-- **JSON-RPC protocol** — optional message protocol for request/response methods and errors. JSON-RPC is a different layer from WebSocket: it can run over stdio, WebSocket, or HTTP.
-
-Each has a seam in [`architecture.md`](architecture.md). The principle is the same for all of them: Surface code changes, `agent.rs` and the core session/tool/provider logic should not.
+Each has a seam in [`architecture.md`](architecture.md). The principle is the same for all of them: extend the relevant component boundary only after concrete pressure exists.
