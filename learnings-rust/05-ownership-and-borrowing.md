@@ -53,6 +53,49 @@ fn read_line(&self, buf: &mut String) -> io::Result<usize>
 
 It requires a `&mut String`. Passing `&line` (shared ref) would be a compile error — `read_line` can't append to a read-only view.
 
+## Project example: the agent loop borrows history
+
+In Checkpoint 3.5c, `lib.rs` still owns the conversation history:
+
+```rust
+let mut history: Vec<Message> = Vec::new();
+```
+
+For each user turn, the REPL lends that history to the agent loop:
+
+```rust
+agent::run_turn(&client, &api_key, &mut history).await
+```
+
+The function signature says exactly what the agent loop is allowed to do:
+
+```rust
+pub(crate) async fn run_turn(
+    client: &reqwest::Client,
+    api_key: &str,
+    history: &mut Vec<Message>,
+) -> Result<()>
+```
+
+`history: &mut Vec<Message>` means: "borrow this vector exclusively, let me modify it, but give it back when I am done." That lets `run_turn` push assistant replies and tool-result messages into the same `Vec<Message>` without taking ownership of it.
+
+The alternatives would mean different things:
+
+| Parameter | Meaning | Why not here |
+|---|---|---|
+| `history: Vec<Message>` | Take ownership of the whole vector. | `lib.rs` would lose `history` unless `run_turn` returned it. |
+| `history: &[Message]` | Borrow a read-only slice. | The agent loop could read history but could not append new messages. |
+| `history: &mut [Message]` | Mutably borrow a fixed-length slice. | The agent loop could edit existing messages but could not `push`. |
+| `history: &mut Vec<Message>` | Mutably borrow the growable vector. | Correct: the caller keeps ownership, and the loop can append. |
+
+While `run_turn` has `&mut history`, no other code can use `history`. After `.await` returns, the borrow is over, so `lib.rs` can safely regain control and roll back a failed turn:
+
+```rust
+history.truncate(history_len_before_turn);
+```
+
+That is the ownership model matching the design: the REPL owns session history, the agent loop gets temporary exclusive editing rights for one turn, then the REPL regains control.
+
 ## When you need `mut`
 
 | Situation | `mut` needed? |

@@ -1,3 +1,4 @@
+mod agent;
 mod anthropic;
 pub mod error;
 pub mod session;
@@ -7,12 +8,7 @@ pub use error::{Error, Result};
 
 use std::io::{self, ErrorKind, Write};
 
-use crate::{
-    anthropic::{ClaudeResponse, ask_claude},
-    session::{Message, MessageContent},
-};
-
-const MAX_TOOL_ROUNDS: usize = 42;
+use crate::session::Message;
 
 pub async fn run() -> Result<()> {
     load_dotenv()?;
@@ -45,7 +41,7 @@ pub async fn run() -> Result<()> {
                     let history_len_before_turn = history.len();
                     history.push(Message::user_text(other));
 
-                    if let Err(e) = run_agent_turn(&client, &api_key, &mut history).await {
+                    if let Err(e) = agent::run_turn(&client, &api_key, &mut history).await {
                         eprintln!("error: {}", e);
                         history.truncate(history_len_before_turn);
                     }
@@ -72,40 +68,6 @@ fn anthropic_api_key() -> Result<String> {
                 .to_string(),
         )
     })
-}
-
-async fn run_agent_turn(
-    client: &reqwest::Client,
-    api_key: &str,
-    history: &mut Vec<Message>,
-) -> Result<()> {
-    let mut tool_rounds = 0;
-
-    loop {
-        match ask_claude(client, api_key, history, tools::definitions()).await? {
-            ClaudeResponse::Text(reply) => {
-                println!("claude: {}", reply);
-                history.push(Message::assistant(vec![MessageContent::Text {
-                    text: reply,
-                }]));
-                return Ok(());
-            }
-            ClaudeResponse::ToolUse(blocks) => {
-                tool_rounds += 1;
-                if tool_rounds > MAX_TOOL_ROUNDS {
-                    return Err(Error::ToolLoopLimitExceeded(MAX_TOOL_ROUNDS));
-                }
-
-                let tool_results = tools::execute_tool_uses(&blocks);
-                if tool_results.is_empty() {
-                    return Err(Error::EmptyContent);
-                }
-
-                history.push(Message::assistant(blocks));
-                history.push(Message::user_tool_results(tool_results));
-            }
-        }
-    }
 }
 
 fn print_help() {
@@ -162,12 +124,5 @@ mod tests {
                 ]
             })
         );
-    }
-
-    #[test]
-    fn tool_loop_limit_error_names_the_limit() {
-        let error = Error::ToolLoopLimitExceeded(MAX_TOOL_ROUNDS);
-
-        assert_eq!(error.to_string(), "tool loop exceeded 42 rounds");
     }
 }
