@@ -41,8 +41,8 @@ impl Provider for ActiveProvider {
 
 pub async fn run() -> Result<()> {
     load_dotenv()?;
-    let provider = active_provider()?;
-    let api_key = api_key(&provider)?;
+    let mut provider = active_provider()?;
+    let mut api_key = api_key(&provider)?;
 
     let client = reqwest::Client::builder().user_agent("cawir/0.1").build()?;
 
@@ -65,7 +65,11 @@ pub async fn run() -> Result<()> {
             "/exit" => break,
             "/help" => print_help(),
             other => {
-                if other.starts_with('/') {
+                if other.split_whitespace().next() == Some("/provider") {
+                    if let Err(error) = switch_provider(other, &mut provider, &mut api_key) {
+                        println!("{}", error);
+                    }
+                } else if other.starts_with('/') {
                     println!("unknown command: {}", other);
                 } else {
                     let history_len_before_turn = history.len();
@@ -95,14 +99,15 @@ fn load_dotenv() -> Result<()> {
 
 fn active_provider() -> Result<ActiveProvider> {
     let name = std::env::var("CAWIR_PROVIDER").unwrap_or_else(|_| "anthropic".to_string());
+    provider_by_name(&name)
+        .map_err(|message| Error::Env(format!("unknown CAWIR_PROVIDER value: {message}")))
+}
 
-    match name.as_str() {
+fn provider_by_name(name: &str) -> std::result::Result<ActiveProvider, String> {
+    match name {
         "anthropic" => Ok(ActiveProvider::Anthropic(Anthropic)),
         "openai" => Ok(ActiveProvider::OpenAi(OpenAi)),
-        other => Err(Error::Env(format!(
-            "unknown CAWIR_PROVIDER value: {}. Expected anthropic or openai.",
-            other
-        ))),
+        other => Err(format!("{}. Expected anthropic or openai.", other)),
     }
 }
 
@@ -118,7 +123,49 @@ fn api_key(provider: &impl Provider) -> Result<String> {
     })
 }
 
+fn switch_provider(
+    input: &str,
+    provider: &mut ActiveProvider,
+    active_api_key: &mut String,
+) -> std::result::Result<(), String> {
+    let mut words = input.split_whitespace();
+    let _command = words.next();
+
+    let Some(name) = words.next() else {
+        print_providers(provider);
+        return Ok(());
+    };
+
+    if words.next().is_some() {
+        return Err("usage: /provider <anthropic|openai>".to_string());
+    }
+
+    let new_provider = provider_by_name(name)?;
+    let new_api_key = api_key(&new_provider).map_err(|error| error.to_string())?;
+
+    *provider = new_provider;
+    *active_api_key = new_api_key;
+
+    println!("provider: {}", provider.name());
+    println!(
+        "note: existing conversation history will be sent to {} on the next turn",
+        provider.name()
+    );
+    Ok(())
+}
+
 fn print_help() {
-    println!("  /exit   quit the REPL");
-    println!("  /help   show this help");
+    println!("  /exit                quit the REPL");
+    println!("  /help                show this help");
+    println!("  /provider            list providers");
+    println!("  /provider <name>     switch providers");
+}
+
+fn print_providers(provider: &ActiveProvider) {
+    println!("current provider: {}", provider.name());
+    println!("available providers:");
+    println!("  anthropic");
+    println!("  openai");
+    println!();
+    println!("use: /provider <name>");
 }

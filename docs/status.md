@@ -6,13 +6,13 @@ This document tracks the current implementation state and recent progress.
 - Checkpoint sequence and scope live in [`roadmap.md`](roadmap.md).
 - Target design and extension seams live in [`architecture.md`](architecture.md).
 
-## Snapshot (as of 2026-05-03)
+## Snapshot (as of 2026-05-05)
 
 - Current focus: **Checkpoint 4 — Providers, Auth, Config**.
 - Next checkpoint: **4 — Providers, Auth, Config**.
-- Latest completed sub-step: **3.5d — Move REPL and slash commands to `repl.rs`**.
-- Planned next order: add OpenAI and extract a concrete `Provider` boundary, then add provider selection, auth methods, credential lookup, Ollama, and provider config before moving to modes.
-- Current user-visible behavior: one user prompt can trigger repeated `read_file`, `list_files`, approval-gated `write_file`, and approval-gated `shell` calls. cawir executes each tool request, sends matching `tool_result` blocks back to Claude, and continues until Claude returns a text answer or the 42-round tool-loop cap is reached. Tool execution failures and denied mutating actions are returned to Claude as error `tool_result` blocks instead of aborting the turn.
+- Latest completed sub-step: **4b — `/provider <name>`**.
+- Planned next order: split provider wire format from auth methods, add credential lookup, add Ollama, and add provider config before moving to modes.
+- Current user-visible behavior: one user prompt can trigger repeated `read_file`, `list_files`, approval-gated `write_file`, and approval-gated `shell` calls. cawir executes each tool request, sends matching `tool_result` blocks back to the active provider, and continues until the provider returns a text answer or the 42-round tool-loop cap is reached. Tool execution failures and denied mutating actions are returned as error `tool_result` blocks instead of aborting the turn. Startup honors `CAWIR_PROVIDER`; bare `/provider` lists provider options; `/provider anthropic|openai` switches providers inside the REPL after checking that the selected provider's API key is available and warns that existing history will be sent to the new provider.
 
 ## Completed checkpoints
 
@@ -49,8 +49,13 @@ This document tracks the current implementation state and recent progress.
 - `3.5c` completed on 2026-05-02. Moved `MAX_TOOL_ROUNDS`, `run_turn`, and the request-tool-result orchestration into `src/agent.rs`. `lib.rs` now keeps REPL/startup concerns and calls the concrete agent module for each non-command user turn.
 - `3.5d` completed on 2026-05-03. Moved `run`, startup setup, slash-command handling, and REPL rendering into `src/repl.rs`; `lib.rs` is now module declarations plus public exports. Moved remaining session serialization tests beside `Message` in `src/session.rs`.
 
+### 4 — Providers, Auth, Config
+
+- `4a` completed on 2026-05-05. Added concrete OpenAI chat-completions support and extracted the shared `Provider` trait from Anthropic/OpenAI duplication. `ActiveProvider` uses explicit enum delegation for now instead of `Box<dyn Provider>`.
+- `4b` completed on 2026-05-05. Added `/provider <anthropic|openai>` as the first argument-taking slash command. Bare `/provider` lists the current and available providers. The REPL now mutates the active provider and API key together, reports bad command usage or missing credentials as user-facing errors, warns that existing history carries across providers, and keeps the session running.
+
 ## Learnings
 
 - `learnings-rust/` currently includes notes `01` through `28`.
-- `learnings-agent/` currently includes notes `01` through `04`.
+- `learnings-agent/` currently includes notes `01` through `05`.
 - New Rust discussions should be distilled into `learnings-rust/*.md`; new agent-design discussions should be distilled into `learnings-agent/*.md`.
