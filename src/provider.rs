@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::{Result, session::Message};
+use crate::{Result, auth::AuthOption, session::Message};
 
 #[derive(Serialize, Clone)]
 pub(crate) struct ToolDefinition {
@@ -17,12 +17,12 @@ pub(crate) enum ProviderResponse {
 pub(crate) trait Provider {
     fn name(&self) -> &'static str;
 
-    fn api_key_env_var(&self) -> &'static str;
+    fn auth_options(&self) -> &'static [AuthOption];
 
     async fn send(
         &self,
         client: &reqwest::Client,
-        api_key: &str,
+        credential: &crate::auth::ActiveCredential,
         messages: &[Message],
         tools: Vec<ToolDefinition>,
     ) -> Result<ProviderResponse>;

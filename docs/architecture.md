@@ -59,7 +59,7 @@ cawir is a **component graph**, not a linear stack. The agent loop is the orches
                 │    Provider + AuthMethod ──► HTTP
                 │              │
                 │              └──► CredentialChain
-                │                   (Keychain/env/.env)
+                │                   (credentials.json/env/.env)
                 │
                 ▼ (pure data; serde)
               Session { id, messages, ... }
@@ -276,7 +276,7 @@ Provider × Auth compatibility matrix (per ToS):
 | OpenAI | `ApiKey`, `OAuthToken` | Codex subscription OAuth officially supported |
 | Ollama | `None` | Local, no auth |
 
-**Credential chain** resolves credentials for a given provider: macOS Keychain → environment variable → `.env` file. The chain is queried by the auth layer at request time.
+**Credential chain** resolves credentials for a given provider: credentials file → environment variable → `.env` file. The chain is queried by the auth layer at request time.
 
 **SettingsResolver** resolves any config key by walking: `./.claude/settings.local.json` → `./.claude/settings.json` → `~/.claude/settings.json`, deep-merging in precedence order. Read-everywhere utility — used by the hook registry, tool registry, slash-command loading, and any other component that reads configuration.
 
@@ -384,7 +384,7 @@ src/
 │   ├── mod.rs           AuthMethod trait + AuthMethodKind
 │   ├── api_key.rs
 │   └── oauth.rs         (later)
-├── credential.rs        Keychain → env → .env lookup chain
+├── credential.rs        credentials file → env → .env lookup chain
 ├── tool/
 │   ├── mod.rs           Tool trait + ToolRegistry
 │   ├── read_file.rs

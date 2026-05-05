@@ -1,5 +1,6 @@
 use crate::{
     Error, Result,
+    auth::ActiveCredential,
     provider::{Provider, ProviderResponse},
     session::{Message, MessageContent},
     tools,
@@ -10,14 +11,14 @@ const MAX_TOOL_ROUNDS: usize = 42;
 pub(crate) async fn run_turn<P: Provider>(
     provider: &P,
     client: &reqwest::Client,
-    api_key: &str,
+    credential: &ActiveCredential,
     history: &mut Vec<Message>,
 ) -> Result<()> {
     let mut tool_rounds = 0;
 
     loop {
         match provider
-            .send(client, api_key, history, tools::definitions())
+            .send(client, credential, history, tools::definitions())
             .await?
         {
             ProviderResponse::Text(reply) => {

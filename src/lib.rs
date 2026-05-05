@@ -1,5 +1,6 @@
 mod agent;
 mod anthropic;
+mod auth;
 pub mod error;
 mod openai;
 mod provider;

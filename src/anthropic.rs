@@ -2,11 +2,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Error, Result,
+    auth::{ActiveCredential, ApiKeyCredential, AuthOption, RequestAuth},
     provider::{Provider, ProviderResponse, ToolDefinition},
     session::{Message, MessageContent},
 };
 
 const MAX_OUTPUT_TOKENS: u32 = 16_384;
+const AUTH_OPTIONS: &[AuthOption] = &[AuthOption::ApiKey(ApiKeyCredential {
+    env_var: "ANTHROPIC_API_KEY",
+    storage_key: "anthropic-api-key",
+    attachment: RequestAuth::Header("x-api-key"),
+})];
 
 pub(crate) struct Anthropic;
 
@@ -35,14 +41,14 @@ impl Provider for Anthropic {
         "anthropic"
     }
 
-    fn api_key_env_var(&self) -> &'static str {
-        "ANTHROPIC_API_KEY"
+    fn auth_options(&self) -> &'static [AuthOption] {
+        AUTH_OPTIONS
     }
 
     async fn send(
         &self,
         client: &reqwest::Client,
-        api_key: &str,
+        credential: &ActiveCredential,
         messages: &[Message],
         tools: Vec<ToolDefinition>,
     ) -> Result<ProviderResponse> {
@@ -56,9 +62,8 @@ impl Provider for Anthropic {
             tools,
         };
 
-        let response = client
-            .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", api_key)
+        let response = credential
+            .attach(client.post("https://api.anthropic.com/v1/messages"))
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
             .json(&req)

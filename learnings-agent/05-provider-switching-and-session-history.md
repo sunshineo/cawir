@@ -6,11 +6,11 @@ In cawir, the REPL owns three pieces of runtime state that matter here:
 
 ```text
 provider
-api_key
+credential
 history
 ```
 
-The `/provider <name>` command changes the active `provider` and matching `api_key`. It does not change `history`.
+The `/provider <name>` command changes the active `provider` and matching resolved `credential`. It does not change `history`.
 
 That means this sequence:
 
@@ -63,4 +63,4 @@ A future `/new` or `/clear` command can give the user an explicit way to start f
 
 The model does not know which provider, account, binary, or runtime selected it unless the agent tells it through context or protocol metadata. Asking "what model are you?" is a weak test of provider selection.
 
-For debugging provider routing, trust local instrumentation: the selected provider enum, request URL, auth method, and model field. Treat model self-description as generated text influenced by prior messages.
+For debugging provider routing, trust local instrumentation: the selected provider enum, request URL, credential option, credential source, and model field. Treat model self-description as generated text influenced by prior messages.

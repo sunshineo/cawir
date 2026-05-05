@@ -93,7 +93,7 @@ Each provider declares which auth methods it accepts. Matrix:
 | Ollama | `None` | Local, no auth. |
 
 **Credential lookup order** (per provider, when resolving a configured credential):
-1. macOS Keychain (crate: `keyring`)
+1. OS-appropriate `credentials.json` config file (`directories` crate; `0600` on Unix)
 2. Environment variable (`std::env::var`)
 3. `.env` file (crate: `dotenvy`)
 

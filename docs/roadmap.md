@@ -192,9 +192,9 @@ Sub-steps:
 
 - **4a — Add OpenAI and extract `Provider`**. Keep Anthropic concrete, add OpenAI concrete, then extract the shared provider shape from the two implementations. *Rust:* traits extracted from real duplication, associated data, static vs dynamic dispatch choices.
 - **4b — `/provider <name>`**. Add the first slash command with an argument using the existing concrete match. Bare `/provider` lists the current provider and available provider names; `/provider <name>` switches the active provider. Switching providers does not clear conversation history, so the next request sends the existing session to the new provider and should warn the user about that. No interactive picker and no command registry yet. *Rust:* parsing command arguments with `split_whitespace`, returning user-facing errors without panicking.
-- **4c — `AuthMethod` and credential chain**. Split wire format from credential attachment. Implement `ApiKey`, `CodexOAuth` for OpenAI, `None`, and lookup order Keychain → environment → `.env`. *Rust:* trait composition, enums for auth kinds, crate choice for `keyring` and `directories`.
+- **4c — Credential options and credential chain**. Split wire format from credential attachment. Implement `ApiKey` and `CodexOAuth` for OpenAI, lookup order credentials file → environment → `.env`, credential acquisition for API keys and Codex OAuth, and saving the selected provider + credential option for the next launch. *Rust:* enums for auth options, owned secret data, serde config files, file permissions, crate choice for `directories`, `rpassword`, and `base64`.
 - **4d — Add Ollama**. Local no-auth provider to pressure-test `Provider` + `AuthMethod` without another cloud credential. *Rust:* provider-specific request/response structs behind one trait.
-- **4e — Provider config**. Remember last-used provider at the OS-appropriate config path. First launch chooses the first provider with usable credentials.
+- **4e — Provider config cleanup**. After Ollama lands, revisit startup selection across Anthropic, OpenAI, and Ollama. First launch chooses the first provider with usable credentials when no saved preference exists; saved provider + credential option from 4c remains the normal path.
 
 Deferred provider-boundary cleanup:
 
