@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use crate::{
     Error, Result,
-    anthropic::ToolDefinition,
+    provider::ToolDefinition,
     session::{MessageContent, ToolResult},
 };
 

@@ -1,10 +1,48 @@
 use std::io::{self, ErrorKind, Write};
 
-use crate::{Error, Result, agent, session::Message};
+use crate::{
+    Error, Result, agent, anthropic::Anthropic, openai::OpenAi, provider::Provider,
+    session::Message,
+};
+
+enum ActiveProvider {
+    Anthropic(Anthropic),
+    OpenAi(OpenAi),
+}
+
+impl Provider for ActiveProvider {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Anthropic(provider) => provider.name(),
+            Self::OpenAi(provider) => provider.name(),
+        }
+    }
+
+    fn api_key_env_var(&self) -> &'static str {
+        match self {
+            Self::Anthropic(provider) => provider.api_key_env_var(),
+            Self::OpenAi(provider) => provider.api_key_env_var(),
+        }
+    }
+
+    async fn send(
+        &self,
+        client: &reqwest::Client,
+        api_key: &str,
+        messages: &[Message],
+        tools: Vec<crate::provider::ToolDefinition>,
+    ) -> Result<crate::provider::ProviderResponse> {
+        match self {
+            Self::Anthropic(provider) => provider.send(client, api_key, messages, tools).await,
+            Self::OpenAi(provider) => provider.send(client, api_key, messages, tools).await,
+        }
+    }
+}
 
 pub async fn run() -> Result<()> {
     load_dotenv()?;
-    let api_key = anthropic_api_key()?;
+    let provider = active_provider()?;
+    let api_key = api_key(&provider)?;
 
     let client = reqwest::Client::builder().user_agent("cawir/0.1").build()?;
 
@@ -33,7 +71,9 @@ pub async fn run() -> Result<()> {
                     let history_len_before_turn = history.len();
                     history.push(Message::user_text(other));
 
-                    if let Err(e) = agent::run_turn(&client, &api_key, &mut history).await {
+                    if let Err(e) =
+                        agent::run_turn(&provider, &client, &api_key, &mut history).await
+                    {
                         eprintln!("error: {}", e);
                         history.truncate(history_len_before_turn);
                     }
@@ -53,12 +93,28 @@ fn load_dotenv() -> Result<()> {
     }
 }
 
-fn anthropic_api_key() -> Result<String> {
-    std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
-        Error::Env(
-            "ANTHROPIC_API_KEY env var not set. Add it to .env or get one from console.anthropic.com."
-                .to_string(),
-        )
+fn active_provider() -> Result<ActiveProvider> {
+    let name = std::env::var("CAWIR_PROVIDER").unwrap_or_else(|_| "anthropic".to_string());
+
+    match name.as_str() {
+        "anthropic" => Ok(ActiveProvider::Anthropic(Anthropic)),
+        "openai" => Ok(ActiveProvider::OpenAi(OpenAi)),
+        other => Err(Error::Env(format!(
+            "unknown CAWIR_PROVIDER value: {}. Expected anthropic or openai.",
+            other
+        ))),
+    }
+}
+
+fn api_key(provider: &impl Provider) -> Result<String> {
+    let env_var = provider.api_key_env_var();
+
+    std::env::var(env_var).map_err(|_| {
+        Error::Env(format!(
+            "{} env var not set. Add it to .env before using the {} provider.",
+            env_var,
+            provider.name()
+        ))
     })
 }
 

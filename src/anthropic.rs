@@ -2,17 +2,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Error, Result,
+    provider::{Provider, ProviderResponse, ToolDefinition},
     session::{Message, MessageContent},
 };
 
 const MAX_OUTPUT_TOKENS: u32 = 16_384;
 
-#[derive(Serialize, Clone)]
-pub(crate) struct ToolDefinition {
-    pub(crate) name: String,
-    pub(crate) description: String,
-    pub(crate) input_schema: serde_json::Value,
-}
+pub(crate) struct Anthropic;
 
 #[derive(Serialize)]
 struct MessageRequest {
@@ -34,57 +30,67 @@ struct MessageResponse {
     content: Vec<MessageContent>,
 }
 
-pub(crate) enum ClaudeResponse {
-    Text(String),
-    ToolUse(Vec<MessageContent>),
-}
-
-pub(crate) async fn ask_claude(
-    client: &reqwest::Client,
-    api_key: &str,
-    messages: &[Message],
-    tools: Vec<ToolDefinition>,
-) -> Result<ClaudeResponse> {
-    let req = MessageRequest {
-        model: "claude-haiku-4-5-20251001".to_string(),
-        max_tokens: MAX_OUTPUT_TOKENS,
-        cache_control: CacheControl {
-            kind: "ephemeral".to_string(),
-        },
-        messages: messages.to_vec(),
-        tools,
-    };
-
-    let response = client
-        .post("https://api.anthropic.com/v1/messages")
-        .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .json(&req)
-        .send()
-        .await?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await?;
-        return Err(Error::Api { status, body });
+impl Provider for Anthropic {
+    fn name(&self) -> &'static str {
+        "anthropic"
     }
 
-    let parsed: MessageResponse = response.json().await?;
-    if parsed
-        .content
-        .iter()
-        .any(|block| matches!(block, MessageContent::ToolUse { .. }))
-    {
-        return Ok(ClaudeResponse::ToolUse(parsed.content));
+    fn api_key_env_var(&self) -> &'static str {
+        "ANTHROPIC_API_KEY"
     }
 
-    let reply = render_text_blocks(&parsed.content);
-    if reply.is_empty() {
-        return Err(Error::EmptyContent);
-    }
+    async fn send(
+        &self,
+        client: &reqwest::Client,
+        api_key: &str,
+        messages: &[Message],
+        tools: Vec<ToolDefinition>,
+    ) -> Result<ProviderResponse> {
+        let req = MessageRequest {
+            model: "claude-haiku-4-5-20251001".to_string(),
+            max_tokens: MAX_OUTPUT_TOKENS,
+            cache_control: CacheControl {
+                kind: "ephemeral".to_string(),
+            },
+            messages: messages.to_vec(),
+            tools,
+        };
 
-    Ok(ClaudeResponse::Text(reply))
+        let response = client
+            .post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&req)
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await?;
+            return Err(Error::Api {
+                provider: self.name().to_string(),
+                status,
+                body,
+            });
+        }
+
+        let parsed: MessageResponse = response.json().await?;
+        if parsed
+            .content
+            .iter()
+            .any(|block| matches!(block, MessageContent::ToolUse { .. }))
+        {
+            return Ok(ProviderResponse::ToolUse(parsed.content));
+        }
+
+        let reply = render_text_blocks(&parsed.content);
+        if reply.is_empty() {
+            return Err(Error::EmptyContent(self.name().to_string()));
+        }
+
+        Ok(ProviderResponse::Text(reply))
+    }
 }
 
 fn render_text_blocks(blocks: &[MessageContent]) -> String {

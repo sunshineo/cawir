@@ -196,6 +196,10 @@ Sub-steps:
 - **4d — Add Ollama**. Local no-auth provider to pressure-test `Provider` + `AuthMethod` without another cloud credential. *Rust:* provider-specific request/response structs behind one trait.
 - **4e — Provider config**. Remember last-used provider at the OS-appropriate config path. First launch chooses the first provider with usable credentials.
 
+Deferred provider-boundary cleanup:
+
+- `ActiveProvider` currently uses explicit enum delegation instead of `Box<dyn Provider>` so the provider set stays concrete and visible while learning. This avoids heap allocation and vtable dispatch, but every new `Provider` method and provider variant adds forwarding boilerplate. If the provider list grows beyond Anthropic/OpenAI/Ollama or the `Provider` trait gains enough methods that manual delegation becomes noisy, evaluate an enum-delegation crate such as `enum_dispatch` or `enum_delegate`. These crates generate the same enum `match` forwarding code while preserving the static enum shape. Do not add one preemptively; first split an overgrown `Provider` trait if the trait itself is carrying too many responsibilities.
+
 Done when: Anthropic, OpenAI, and Ollama can be selected; credential lookup is explicit; `agent.rs` calls a provider boundary instead of `ask_claude`; `/provider anthropic|openai|ollama` works.
 
 Components: External, Surface.
@@ -239,6 +243,10 @@ Components: Capabilities, Surface.
 ## 7 — Sessions And Resume
 
 Persist conversations and make runtime state separate from durable session data.
+
+Session-design note:
+
+- The internal session format should be designed for cawir's own needs: durable conversation state, context management, resume, compaction, tool-result history, provider/mode metadata, and future agent quality work. It should not be treated as a mirror of any provider's API shape. Anthropic and OpenAI already prove that provider adapters can translate between one internal `Message`/content model and different wire formats. If the internal model changes in CP7, prefer a shape that helps the agent manage context well, then make each provider adapter map that shape to its API.
 
 Sub-steps:
 

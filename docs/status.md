@@ -51,6 +51,6 @@ This document tracks the current implementation state and recent progress.
 
 ## Learnings
 
-- `learnings-rust/` currently includes notes `01` through `27`.
+- `learnings-rust/` currently includes notes `01` through `28`.
 - `learnings-agent/` currently includes notes `01` through `04`.
 - New Rust discussions should be distilled into `learnings-rust/*.md`; new agent-design discussions should be distilled into `learnings-agent/*.md`.

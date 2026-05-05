@@ -11,14 +11,15 @@ pub enum Error {
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
 
-    #[error("anthropic api error {status}: {body}")]
+    #[error("{provider} api error {status}: {body}")]
     Api {
+        provider: String,
         status: reqwest::StatusCode,
         body: String,
     },
 
-    #[error("anthropic returned empty content")]
-    EmptyContent,
+    #[error("{0} returned empty content")]
+    EmptyContent(String),
 
     #[error("unknown tool requested: {0}")]
     UnknownTool(String),

@@ -1,13 +1,14 @@
 use crate::{
     Error, Result,
-    anthropic::{ClaudeResponse, ask_claude},
+    provider::{Provider, ProviderResponse},
     session::{Message, MessageContent},
     tools,
 };
 
 const MAX_TOOL_ROUNDS: usize = 42;
 
-pub(crate) async fn run_turn(
+pub(crate) async fn run_turn<P: Provider>(
+    provider: &P,
     client: &reqwest::Client,
     api_key: &str,
     history: &mut Vec<Message>,
@@ -15,15 +16,18 @@ pub(crate) async fn run_turn(
     let mut tool_rounds = 0;
 
     loop {
-        match ask_claude(client, api_key, history, tools::definitions()).await? {
-            ClaudeResponse::Text(reply) => {
-                println!("claude: {}", reply);
+        match provider
+            .send(client, api_key, history, tools::definitions())
+            .await?
+        {
+            ProviderResponse::Text(reply) => {
+                println!("{}: {}", provider.name(), reply);
                 history.push(Message::assistant(vec![MessageContent::Text {
                     text: reply,
                 }]));
                 return Ok(());
             }
-            ClaudeResponse::ToolUse(blocks) => {
+            ProviderResponse::ToolUse(blocks) => {
                 tool_rounds += 1;
                 if tool_rounds > MAX_TOOL_ROUNDS {
                     return Err(Error::ToolLoopLimitExceeded(MAX_TOOL_ROUNDS));
@@ -31,7 +35,7 @@ pub(crate) async fn run_turn(
 
                 let tool_results = tools::execute_tool_uses(&blocks);
                 if tool_results.is_empty() {
-                    return Err(Error::EmptyContent);
+                    return Err(Error::EmptyContent(provider.name().to_string()));
                 }
 
                 history.push(Message::assistant(blocks));

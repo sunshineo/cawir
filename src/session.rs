@@ -18,7 +18,7 @@ pub struct ToolResult {
     pub is_error: bool,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "type")]
 pub enum MessageContent {
     #[serde(rename = "text")]
