@@ -12,6 +12,69 @@ use crate::{
     session::{MessageContent, ToolResult},
 };
 
+trait Tool {
+    fn name(&self) -> &'static str;
+    fn description(&self) -> &'static str;
+    fn input_schema(&self) -> Value;
+    fn kind(&self) -> ToolKind;
+
+    fn is_available(&self, mode: PermissionMode) -> bool {
+        mode == PermissionMode::Plan || self.name() != "exit_plan_mode"
+    }
+
+    fn execute(&self, input: &Value, mode: PermissionMode) -> Result<ToolOutput>;
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: self.description().to_string(),
+            input_schema: self.input_schema(),
+        }
+    }
+}
+
+struct ToolRegistry {
+    tools: Vec<Box<dyn Tool>>,
+}
+
+impl ToolRegistry {
+    fn builtins() -> Self {
+        Self {
+            tools: vec![
+                Box::new(ListFilesTool),
+                Box::new(ReadFileTool),
+                Box::new(WriteFileTool),
+                Box::new(ShellTool),
+                Box::new(ExitPlanModeTool),
+            ],
+        }
+    }
+
+    fn definitions(&self, mode: PermissionMode) -> Vec<ToolDefinition> {
+        self.tools
+            .iter()
+            .filter(|tool| tool.is_available(mode))
+            .map(|tool| tool.definition())
+            .collect()
+    }
+
+    fn execute(&self, name: &str, input: &Value, mode: PermissionMode) -> Result<ToolOutput> {
+        let tool = self
+            .tools
+            .iter()
+            .find(|tool| tool.name() == name)
+            .ok_or_else(|| Error::UnknownTool(name.to_string()))?;
+
+        let _decision = permission_decision(mode, tool.kind());
+        tool.execute(input, mode)
+    }
+}
+
+enum ToolOutput {
+    Result(String),
+    PlanReady(String),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PlanReady {
     pub(crate) tool_use_id: Option<String>,
@@ -25,25 +88,22 @@ pub(crate) struct ToolExecution {
 }
 
 pub(crate) fn definitions(mode: PermissionMode) -> Vec<ToolDefinition> {
-    let mut definitions = vec![
-        list_files_tool(),
-        read_file_tool(),
-        write_file_tool(),
-        shell_tool(),
-    ];
-
-    if mode == PermissionMode::Plan {
-        definitions.push(exit_plan_mode_tool());
-    }
-
-    definitions
+    ToolRegistry::builtins().definitions(mode)
 }
 
-fn read_file_tool() -> ToolDefinition {
-    ToolDefinition {
-        name: "read_file".to_string(),
-        description: "Read the full contents of a UTF-8 text file from the current project. Use this when you need to inspect source code, configuration, documentation, or other text files before answering. Provide a path relative to the current working directory when possible. Do not use this for files outside the project unless the user clearly asks for them.".to_string(),
-        input_schema: json!({
+struct ReadFileTool;
+
+impl Tool for ReadFileTool {
+    fn name(&self) -> &'static str {
+        "read_file"
+    }
+
+    fn description(&self) -> &'static str {
+        "Read the full contents of a UTF-8 text file from the current project. Use this when you need to inspect source code, configuration, documentation, or other text files before answering. Provide a path relative to the current working directory when possible. Do not use this for files outside the project unless the user clearly asks for them."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
             "type": "object",
             "properties": {
                 "path": {
@@ -53,15 +113,31 @@ fn read_file_tool() -> ToolDefinition {
             },
             "required": ["path"],
             "additionalProperties": false
-        }),
+        })
+    }
+
+    fn kind(&self) -> ToolKind {
+        ToolKind::ReadOnly
+    }
+
+    fn execute(&self, input: &Value, _mode: PermissionMode) -> Result<ToolOutput> {
+        execute_read_file(input).map(ToolOutput::Result)
     }
 }
 
-fn list_files_tool() -> ToolDefinition {
-    ToolDefinition {
-        name: "list_files".to_string(),
-        description: "List the files and directories inside a folder from the current project. Use this before read_file when you need to discover repository structure or find likely files to inspect. Provide a path relative to the current working directory when possible.".to_string(),
-        input_schema: json!({
+struct ListFilesTool;
+
+impl Tool for ListFilesTool {
+    fn name(&self) -> &'static str {
+        "list_files"
+    }
+
+    fn description(&self) -> &'static str {
+        "List the files and directories inside a folder from the current project. Use this before read_file when you need to discover repository structure or find likely files to inspect. Provide a path relative to the current working directory when possible."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
             "type": "object",
             "properties": {
                 "path": {
@@ -71,15 +147,31 @@ fn list_files_tool() -> ToolDefinition {
             },
             "required": ["path"],
             "additionalProperties": false
-        }),
+        })
+    }
+
+    fn kind(&self) -> ToolKind {
+        ToolKind::ReadOnly
+    }
+
+    fn execute(&self, input: &Value, _mode: PermissionMode) -> Result<ToolOutput> {
+        execute_list_files(input).map(ToolOutput::Result)
     }
 }
 
-fn write_file_tool() -> ToolDefinition {
-    ToolDefinition {
-        name: "write_file".to_string(),
-        description: "Write UTF-8 text content to a file in the current project. Use this only when the user asks you to create or replace a file. The write will require explicit user approval before it runs.".to_string(),
-        input_schema: json!({
+struct WriteFileTool;
+
+impl Tool for WriteFileTool {
+    fn name(&self) -> &'static str {
+        "write_file"
+    }
+
+    fn description(&self) -> &'static str {
+        "Write UTF-8 text content to a file in the current project. Use this only when the user asks you to create or replace a file. The write will require explicit user approval before it runs."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
             "type": "object",
             "properties": {
                 "path": {
@@ -93,15 +185,31 @@ fn write_file_tool() -> ToolDefinition {
             },
             "required": ["path", "content"],
             "additionalProperties": false
-        }),
+        })
+    }
+
+    fn kind(&self) -> ToolKind {
+        ToolKind::WriteFile
+    }
+
+    fn execute(&self, input: &Value, mode: PermissionMode) -> Result<ToolOutput> {
+        execute_write_file(input, mode).map(ToolOutput::Result)
     }
 }
 
-fn shell_tool() -> ToolDefinition {
-    ToolDefinition {
-        name: "shell".to_string(),
-        description: "Run a shell command in the current project. Do not use shell for directory listings, file reads, or file writes; use the dedicated list_files, read_file, and write_file tools for those. Use shell for commands that need a process, such as tests, formatters, builds, git commands, or search commands. The command will require explicit user approval before it runs.".to_string(),
-        input_schema: json!({
+struct ShellTool;
+
+impl Tool for ShellTool {
+    fn name(&self) -> &'static str {
+        "shell"
+    }
+
+    fn description(&self) -> &'static str {
+        "Run a shell command in the current project. Do not use shell for directory listings, file reads, or file writes; use the dedicated list_files, read_file, and write_file tools for those. Use shell for commands that need a process, such as tests, formatters, builds, git commands, or search commands. The command will require explicit user approval before it runs."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
             "type": "object",
             "properties": {
                 "command": {
@@ -111,15 +219,31 @@ fn shell_tool() -> ToolDefinition {
             },
             "required": ["command"],
             "additionalProperties": false
-        }),
+        })
+    }
+
+    fn kind(&self) -> ToolKind {
+        ToolKind::Shell
+    }
+
+    fn execute(&self, input: &Value, mode: PermissionMode) -> Result<ToolOutput> {
+        execute_shell(input, mode).map(ToolOutput::Result)
     }
 }
 
-fn exit_plan_mode_tool() -> ToolDefinition {
-    ToolDefinition {
-        name: "exit_plan_mode".to_string(),
-        description: "Submit a concise implementation plan for user approval. Use this when you are in plan mode and ready to ask permission to make changes.".to_string(),
-        input_schema: json!({
+struct ExitPlanModeTool;
+
+impl Tool for ExitPlanModeTool {
+    fn name(&self) -> &'static str {
+        "exit_plan_mode"
+    }
+
+    fn description(&self) -> &'static str {
+        "Submit a concise implementation plan for user approval. Use this when you are in plan mode and ready to ask permission to make changes."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
             "type": "object",
             "properties": {
                 "plan": {
@@ -129,11 +253,20 @@ fn exit_plan_mode_tool() -> ToolDefinition {
             },
             "required": ["plan"],
             "additionalProperties": false
-        }),
+        })
+    }
+
+    fn kind(&self) -> ToolKind {
+        ToolKind::ExitPlanMode
+    }
+
+    fn execute(&self, input: &Value, _mode: PermissionMode) -> Result<ToolOutput> {
+        plan_from_exit_plan_mode(input).map(ToolOutput::PlanReady)
     }
 }
 
 pub(crate) fn execute_tool_uses(blocks: &[MessageContent], mode: PermissionMode) -> ToolExecution {
+    let registry = ToolRegistry::builtins();
     let mut results = Vec::new();
     let mut plan_ready = None;
 
@@ -144,49 +277,32 @@ pub(crate) fn execute_tool_uses(blocks: &[MessageContent], mode: PermissionMode)
             }
             MessageContent::ToolUse { id, name, input } => {
                 println!("tool request: {} ({})", name, id);
-                if name == "exit_plan_mode" {
-                    match plan_from_exit_plan_mode(input) {
-                        Ok(plan) => {
-                            println!("plan ready for approval");
-                            plan_ready = Some(PlanReady {
-                                tool_use_id: Some(id.clone()),
-                                plan,
-                            });
-                            continue;
-                        }
-                        Err(error) => {
-                            let content = error.to_string();
-                            print_tool_error(name, &content);
-                            results.push(ToolResult {
-                                tool_use_id: id.clone(),
-                                content,
-                                is_error: true,
-                            });
-                            continue;
-                        }
-                    }
-                }
-
-                let result = match execute_tool_call(name, input, mode) {
-                    Ok(content) => {
+                match registry.execute(name, input, mode) {
+                    Ok(ToolOutput::Result(content)) => {
                         print_tool_result(name, &content);
-                        ToolResult {
+                        results.push(ToolResult {
                             tool_use_id: id.clone(),
                             content,
                             is_error: false,
-                        }
+                        });
+                    }
+                    Ok(ToolOutput::PlanReady(plan)) => {
+                        println!("plan ready for approval");
+                        plan_ready = Some(PlanReady {
+                            tool_use_id: Some(id.clone()),
+                            plan,
+                        });
                     }
                     Err(error) => {
                         let content = error.to_string();
                         print_tool_error(name, &content);
-                        ToolResult {
+                        results.push(ToolResult {
                             tool_use_id: id.clone(),
                             content,
                             is_error: true,
-                        }
+                        });
                     }
-                };
-                results.push(result);
+                }
             }
             MessageContent::ToolResult { .. } => {}
         }
@@ -198,19 +314,14 @@ pub(crate) fn execute_tool_uses(blocks: &[MessageContent], mode: PermissionMode)
     }
 }
 
+#[cfg(test)]
 fn execute_tool_call(name: &str, input: &Value, mode: PermissionMode) -> Result<String> {
-    match name {
-        "list_files" => {
-            let _decision = permission_decision(mode, ToolKind::ReadOnly);
-            execute_list_files(input)
-        }
-        "read_file" => {
-            let _decision = permission_decision(mode, ToolKind::ReadOnly);
-            execute_read_file(input)
-        }
-        "write_file" => execute_write_file(input, mode),
-        "shell" => execute_shell(input, mode),
-        _ => Err(Error::UnknownTool(name.to_string())),
+    match ToolRegistry::builtins().execute(name, input, mode)? {
+        ToolOutput::Result(content) => Ok(content),
+        ToolOutput::PlanReady(_) => Err(Error::ToolInput {
+            tool: name.to_string(),
+            message: "expected ordinary tool result, received plan-ready output".to_string(),
+        }),
     }
 }
 

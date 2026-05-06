@@ -1,6 +1,8 @@
 use std::{
     collections::BTreeMap,
+    future::Future,
     io::{self, ErrorKind, Write},
+    pin::Pin,
 };
 
 use crate::{
@@ -16,6 +18,159 @@ use crate::{
     provider::Provider,
     session::Message,
 };
+
+type CommandFuture<'a> =
+    Pin<Box<dyn Future<Output = std::result::Result<CommandOutcome, String>> + 'a>>;
+
+trait Command {
+    fn name(&self) -> &'static str;
+    fn run<'a>(&'a self, args: &'a str, context: CommandContext<'a>) -> CommandFuture<'a>;
+}
+
+struct CommandRegistry {
+    commands: Vec<Box<dyn Command>>,
+}
+
+impl CommandRegistry {
+    fn builtins() -> Self {
+        Self {
+            commands: vec![
+                Box::new(ExitCommand),
+                Box::new(HelpCommand),
+                Box::new(ProviderCommand),
+                Box::new(ModelCommand),
+                Box::new(ModeCommand),
+            ],
+        }
+    }
+
+    async fn execute(
+        &self,
+        input: &str,
+        context: CommandContext<'_>,
+    ) -> Option<std::result::Result<CommandOutcome, String>> {
+        let command_name = input.split_whitespace().next()?;
+        let command = self
+            .commands
+            .iter()
+            .find(|command| command.name() == command_name)?;
+        let args = input[command_name.len()..].trim();
+
+        Some(command.run(args, context).await)
+    }
+}
+
+struct CommandContext<'a> {
+    provider: &'a mut ActiveProvider,
+    credential: &'a mut ActiveCredential,
+    model: &'a mut String,
+    model_preferences: &'a mut BTreeMap<String, String>,
+    client: &'a reqwest::Client,
+    mode: &'a mut PermissionMode,
+}
+
+enum CommandOutcome {
+    Continue,
+    Exit,
+}
+
+struct ExitCommand;
+
+impl Command for ExitCommand {
+    fn name(&self) -> &'static str {
+        "/exit"
+    }
+
+    fn run<'a>(&'a self, args: &'a str, _context: CommandContext<'a>) -> CommandFuture<'a> {
+        Box::pin(async move {
+            if args.is_empty() {
+                Ok(CommandOutcome::Exit)
+            } else {
+                Err("usage: /exit".to_string())
+            }
+        })
+    }
+}
+
+struct HelpCommand;
+
+impl Command for HelpCommand {
+    fn name(&self) -> &'static str {
+        "/help"
+    }
+
+    fn run<'a>(&'a self, args: &'a str, _context: CommandContext<'a>) -> CommandFuture<'a> {
+        Box::pin(async move {
+            if args.is_empty() {
+                print_help();
+                Ok(CommandOutcome::Continue)
+            } else {
+                Err("usage: /help".to_string())
+            }
+        })
+    }
+}
+
+struct ProviderCommand;
+
+impl Command for ProviderCommand {
+    fn name(&self) -> &'static str {
+        "/provider"
+    }
+
+    fn run<'a>(&'a self, args: &'a str, context: CommandContext<'a>) -> CommandFuture<'a> {
+        Box::pin(async move {
+            switch_provider(
+                args,
+                context.provider,
+                context.credential,
+                context.model,
+                context.model_preferences,
+                context.client,
+            )
+            .await?;
+            Ok(CommandOutcome::Continue)
+        })
+    }
+}
+
+struct ModelCommand;
+
+impl Command for ModelCommand {
+    fn name(&self) -> &'static str {
+        "/model"
+    }
+
+    fn run<'a>(&'a self, args: &'a str, context: CommandContext<'a>) -> CommandFuture<'a> {
+        Box::pin(async move {
+            switch_model(
+                args,
+                context.provider,
+                context.credential,
+                context.model,
+                context.model_preferences,
+                context.client,
+            )
+            .await?;
+            Ok(CommandOutcome::Continue)
+        })
+    }
+}
+
+struct ModeCommand;
+
+impl Command for ModeCommand {
+    fn name(&self) -> &'static str {
+        "/mode"
+    }
+
+    fn run<'a>(&'a self, args: &'a str, context: CommandContext<'a>) -> CommandFuture<'a> {
+        Box::pin(async move {
+            switch_mode(args, context.mode)?;
+            Ok(CommandOutcome::Continue)
+        })
+    }
+}
 
 enum ActiveProvider {
     Anthropic(Anthropic),
@@ -113,6 +268,7 @@ pub async fn run() -> Result<()> {
 
     let mut history: Vec<Message> = Vec::new();
     let mut mode = PermissionMode::Default;
+    let command_registry = CommandRegistry::builtins();
     println!("mode: {}", mode.name());
 
     loop {
@@ -127,62 +283,44 @@ pub async fn run() -> Result<()> {
         }
 
         let trimmed = line.trim();
-        match trimmed {
-            "" => continue,
-            "/exit" => break,
-            "/help" => print_help(),
-            other => {
-                if other.split_whitespace().next() == Some("/provider") {
-                    if let Err(error) = switch_provider(
-                        other,
-                        &mut provider,
-                        &mut credential,
-                        &mut model,
-                        &mut model_preferences,
-                        &client,
-                    )
-                    .await
-                    {
-                        println!("{}", error);
-                    }
-                } else if other.split_whitespace().next() == Some("/model") {
-                    if let Err(error) = switch_model(
-                        other,
-                        &provider,
-                        &credential,
-                        &mut model,
-                        &mut model_preferences,
-                        &client,
-                    )
-                    .await
-                    {
-                        println!("{}", error);
-                    }
-                } else if other.split_whitespace().next() == Some("/mode") {
-                    if let Err(error) = switch_mode(other, &mut mode) {
-                        println!("{}", error);
-                    }
-                } else if other.starts_with('/') {
-                    println!("unknown command: {}", other);
-                } else {
-                    let history_len_before_turn = history.len();
-                    history.push(Message::user_text(other));
+        if trimmed.is_empty() {
+            continue;
+        }
 
-                    if let Err(e) = run_agent_until_complete(
-                        &provider,
-                        &client,
-                        &credential,
-                        &model,
-                        &mut mode,
-                        &mut history,
-                    )
-                    .await
-                    {
-                        eprintln!("error: {}", e);
-                        history.truncate(history_len_before_turn);
-                    }
-                }
+        if trimmed.starts_with('/') {
+            let context = CommandContext {
+                provider: &mut provider,
+                credential: &mut credential,
+                model: &mut model,
+                model_preferences: &mut model_preferences,
+                client: &client,
+                mode: &mut mode,
+            };
+
+            match command_registry.execute(trimmed, context).await {
+                Some(Ok(CommandOutcome::Continue)) => {}
+                Some(Ok(CommandOutcome::Exit)) => break,
+                Some(Err(error)) => println!("{}", error),
+                None => println!("unknown command: {}", trimmed),
             }
+            continue;
+        }
+
+        let history_len_before_turn = history.len();
+        history.push(Message::user_text(trimmed));
+
+        if let Err(e) = run_agent_until_complete(
+            &provider,
+            &client,
+            &credential,
+            &model,
+            &mut mode,
+            &mut history,
+        )
+        .await
+        {
+            eprintln!("error: {}", e);
+            history.truncate(history_len_before_turn);
         }
     }
 
@@ -384,7 +522,6 @@ async fn switch_provider(
     client: &reqwest::Client,
 ) -> std::result::Result<(), String> {
     let mut words = input.split_whitespace();
-    let _command = words.next();
 
     let Some(name) = words.next() else {
         print_providers(provider);
@@ -548,7 +685,6 @@ fn print_help() {
 
 fn switch_mode(input: &str, mode: &mut PermissionMode) -> std::result::Result<(), String> {
     let mut words = input.split_whitespace();
-    let _command = words.next();
 
     let Some(mode_name) = words.next() else {
         print_mode(*mode);
@@ -586,7 +722,6 @@ async fn switch_model(
     client: &reqwest::Client,
 ) -> std::result::Result<(), String> {
     let mut words = input.split_whitespace();
-    let _command = words.next();
 
     let Some(new_model) = words.next() else {
         print_model(provider, credential, model, client).await;
@@ -713,7 +848,7 @@ mod tests {
     fn switch_mode_accepts_known_modes() {
         let mut mode = PermissionMode::Default;
 
-        switch_mode("/mode plan", &mut mode).unwrap();
+        switch_mode("plan", &mut mode).unwrap();
 
         assert_eq!(mode, PermissionMode::Plan);
     }
@@ -721,7 +856,7 @@ mod tests {
     #[test]
     fn switch_mode_rejects_unknown_modes() {
         let mut mode = PermissionMode::Default;
-        let error = switch_mode("/mode turbo", &mut mode).unwrap_err();
+        let error = switch_mode("turbo", &mut mode).unwrap_err();
 
         assert!(error.contains("unknown mode: turbo"));
         assert_eq!(mode, PermissionMode::Default);
