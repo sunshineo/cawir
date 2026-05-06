@@ -38,6 +38,12 @@ OpenAI Codex OAuth:
 PROVIDER=openai AUTH_OPTION=codex-oauth cargo test live_smoke -- --ignored --nocapture
 ```
 
+Ollama local no-auth:
+
+```sh
+PROVIDER=ollama AUTH_OPTION=none cargo test live_smoke -- --ignored --nocapture
+```
+
 Credential lookup is the same chain as the REPL:
 
 ```text
@@ -45,3 +51,9 @@ credentials.json -> environment -> .env
 ```
 
 For Codex OAuth, authenticate once through `/provider openai codex-oauth --reset`; future live tests can reuse and refresh the saved token bundle.
+
+For Ollama, start the local Ollama app or service first and make sure the configured model is available:
+
+```sh
+ollama pull qwen3:8b
+```

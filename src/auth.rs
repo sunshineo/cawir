@@ -18,6 +18,7 @@ const TOKEN_EXPIRY_SKEW_SECONDS: u64 = 60;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AuthOption {
+    None,
     ApiKey(ApiKeyCredential),
     CodexOAuth(CodexOAuthCredential),
 }
@@ -37,6 +38,7 @@ pub(crate) struct CodexOAuthCredential {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RequestAuth {
+    None,
     Bearer,
     Header(&'static str),
 }
@@ -52,6 +54,7 @@ pub(crate) struct ActiveCredential {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CredentialSource {
+    Local,
     ConfigFile,
     Environment,
 }
@@ -114,6 +117,7 @@ struct OAuthRefreshResponse {
 impl AuthOption {
     pub(crate) fn name(&self) -> &'static str {
         match self {
+            Self::None => "none",
             Self::ApiKey(_) => "api-key",
             Self::CodexOAuth(_) => "codex-oauth",
         }
@@ -121,17 +125,19 @@ impl AuthOption {
 
     pub(crate) fn env_var(&self) -> Option<&'static str> {
         match self {
+            Self::None => None,
             Self::ApiKey(auth) => Some(auth.env_var),
             Self::CodexOAuth(auth) => Some(auth.env_var),
         }
     }
 
     pub(crate) fn is_acquirable(&self) -> bool {
-        true
+        !matches!(self, Self::None)
     }
 
     fn storage_key(&self) -> &'static str {
         match self {
+            Self::None => "none",
             Self::ApiKey(auth) => auth.storage_key,
             Self::CodexOAuth(auth) => auth.storage_key,
         }
@@ -139,6 +145,7 @@ impl AuthOption {
 
     fn request_auth(&self) -> RequestAuth {
         match self {
+            Self::None => RequestAuth::None,
             Self::ApiKey(auth) => auth.attachment,
             Self::CodexOAuth(_) => RequestAuth::Bearer,
         }
@@ -148,6 +155,7 @@ impl AuthOption {
 impl RequestAuth {
     fn attach(self, request: reqwest::RequestBuilder, secret: &str) -> reqwest::RequestBuilder {
         match self {
+            Self::None => request,
             Self::Bearer => request.bearer_auth(secret),
             Self::Header(name) => request.header(name, secret),
         }
@@ -161,6 +169,7 @@ impl ActiveCredential {
 
     pub(crate) fn source_name(&self) -> &'static str {
         match self.source {
+            CredentialSource::Local => "local",
             CredentialSource::ConfigFile => "config file",
             CredentialSource::Environment => "environment/.env",
         }
@@ -199,9 +208,14 @@ pub(crate) async fn resolve_for_provider(
         .filter_map(AuthOption::env_var)
         .collect::<Vec<_>>()
         .join(", ");
+    let checked_env_vars = if env_vars.is_empty() {
+        "none".to_string()
+    } else {
+        env_vars
+    };
 
     Err(Error::Env(format!(
-        "no credentials found for {provider}. Checked credentials.json, then environment/.env vars: {env_vars}. Accepted credential options: {accepted}."
+        "no credentials found for {provider}. Checked credentials.json, then environment/.env vars: {checked_env_vars}. Accepted credential options: {accepted}."
     )))
 }
 
@@ -327,6 +341,16 @@ async fn resolve(
     option: &AuthOption,
     client: &reqwest::Client,
 ) -> Result<Option<ActiveCredential>> {
+    if matches!(option, AuthOption::None) {
+        return Ok(Some(ActiveCredential {
+            option_name: option.name(),
+            request_auth: option.request_auth(),
+            secret: String::new(),
+            source: CredentialSource::Local,
+            chatgpt_account_id: None,
+        }));
+    }
+
     if let Some(stored) = read_stored_credential(option.storage_key())? {
         return match (option, stored) {
             (AuthOption::ApiKey(_), StoredCredential::ApiKey { secret }) => {

@@ -32,7 +32,8 @@ pub(crate) trait Provider {
 mod tests {
     use super::*;
     use crate::{
-        Error, anthropic::Anthropic, auth::resolve_for_provider, openai::OpenAi, session::Message,
+        Error, anthropic::Anthropic, auth::resolve_for_provider, ollama::Ollama, openai::OpenAi,
+        session::Message,
     };
 
     #[tokio::test]
@@ -41,9 +42,9 @@ mod tests {
         let _ = dotenvy::dotenv();
 
         let provider = std::env::var("PROVIDER")
-            .map_err(|_| Error::Env("set PROVIDER=anthropic|openai".to_string()))?;
+            .map_err(|_| Error::Env("set PROVIDER=anthropic|openai|ollama".to_string()))?;
         let auth_option = std::env::var("AUTH_OPTION")
-            .map_err(|_| Error::Env("set AUTH_OPTION=api-key|codex-oauth".to_string()))?;
+            .map_err(|_| Error::Env("set AUTH_OPTION=api-key|codex-oauth|none".to_string()))?;
         let client = reqwest::Client::builder()
             .user_agent("cawir-live-test/0.1")
             .build()?;
@@ -78,9 +79,22 @@ mod tests {
                     .send(&client, &credential, &messages, Vec::new())
                     .await?
             }
+            "ollama" => {
+                let provider = Ollama;
+                let credential = resolve_for_provider(
+                    provider.name(),
+                    provider.auth_options(),
+                    Some(&auth_option),
+                    &client,
+                )
+                .await?;
+                provider
+                    .send(&client, &credential, &messages, Vec::new())
+                    .await?
+            }
             other => {
                 return Err(Error::Env(format!(
-                    "unknown PROVIDER={other}; expected anthropic or openai"
+                    "unknown PROVIDER={other}; expected anthropic, openai, or ollama"
                 )));
             }
         };

@@ -7,6 +7,7 @@ use crate::{
         ActiveCredential, AuthOption, ProviderPreference, acquire_codex_oauth, find_option,
         load_provider_preference, resolve_for_provider, save_api_key, save_provider_preference,
     },
+    ollama::Ollama,
     openai::OpenAi,
     provider::Provider,
     session::Message,
@@ -14,6 +15,7 @@ use crate::{
 
 enum ActiveProvider {
     Anthropic(Anthropic),
+    Ollama(Ollama),
     OpenAi(OpenAi),
 }
 
@@ -21,6 +23,7 @@ impl Provider for ActiveProvider {
     fn name(&self) -> &'static str {
         match self {
             Self::Anthropic(provider) => provider.name(),
+            Self::Ollama(provider) => provider.name(),
             Self::OpenAi(provider) => provider.name(),
         }
     }
@@ -28,6 +31,7 @@ impl Provider for ActiveProvider {
     fn auth_options(&self) -> &'static [crate::auth::AuthOption] {
         match self {
             Self::Anthropic(provider) => provider.auth_options(),
+            Self::Ollama(provider) => provider.auth_options(),
             Self::OpenAi(provider) => provider.auth_options(),
         }
     }
@@ -41,6 +45,7 @@ impl Provider for ActiveProvider {
     ) -> Result<crate::provider::ProviderResponse> {
         match self {
             Self::Anthropic(provider) => provider.send(client, credential, messages, tools).await,
+            Self::Ollama(provider) => provider.send(client, credential, messages, tools).await,
             Self::OpenAi(provider) => provider.send(client, credential, messages, tools).await,
         }
     }
@@ -119,7 +124,11 @@ async fn startup_provider(
     if let Some(preference) = preference {
         candidates.push(preference.provider.clone());
     }
-    candidates.extend(["anthropic".to_string(), "openai".to_string()]);
+    candidates.extend([
+        "anthropic".to_string(),
+        "openai".to_string(),
+        "ollama".to_string(),
+    ]);
 
     for name in candidates {
         let provider = provider_by_name(&name)
@@ -139,14 +148,16 @@ async fn startup_provider(
 fn provider_by_name(name: &str) -> std::result::Result<ActiveProvider, String> {
     match name {
         "anthropic" => Ok(ActiveProvider::Anthropic(Anthropic)),
+        "ollama" => Ok(ActiveProvider::Ollama(Ollama)),
         "openai" => Ok(ActiveProvider::OpenAi(OpenAi)),
-        other => Err(format!("{}. Expected anthropic or openai.", other)),
+        other => Err(format!("{}. Expected anthropic, openai, or ollama.", other)),
     }
 }
 
-fn available_providers() -> [ActiveProvider; 2] {
+fn available_providers() -> [ActiveProvider; 3] {
     [
         ActiveProvider::Anthropic(Anthropic),
+        ActiveProvider::Ollama(Ollama),
         ActiveProvider::OpenAi(OpenAi),
     ]
 }
@@ -269,12 +280,21 @@ async fn acquire_credential_for_provider_with_option(
             )));
         };
         option
+    } else if let Some(option) = find_option(provider.auth_options(), "none") {
+        option
     } else {
         print_auth_options(provider.auth_options());
         prompt_auth_option(provider.auth_options())?
     };
 
     match option {
+        AuthOption::None => {
+            let credential =
+                resolve_for_provider(provider.name(), provider.auth_options(), None, client)
+                    .await?;
+            save_provider_preference(provider.name(), credential.option_name())?;
+            Ok(credential)
+        }
         AuthOption::ApiKey(_) => {
             let prompt = format!(
                 "Paste {} for {}: ",
@@ -362,6 +382,11 @@ fn print_available_providers() {
             .map(AuthOption::name)
             .collect::<Vec<_>>()
             .join(", ");
+        let credential_options = if credential_options.is_empty() {
+            "none".to_string()
+        } else {
+            credential_options
+        };
 
         println!(
             "  {} (credential options: {})",
@@ -372,5 +397,5 @@ fn print_available_providers() {
 }
 
 fn provider_usage() -> String {
-    "usage: /provider <anthropic|openai> [api-key|codex-oauth] [--reset]".to_string()
+    "usage: /provider <anthropic|openai|ollama> [none|api-key|codex-oauth] [--reset]".to_string()
 }
