@@ -8,10 +8,15 @@ use crate::{
     session::{Message, MessageContent},
 };
 
-const MODEL: &str = "gpt-4.1";
-const CODEX_MODEL: &str = "gpt-5.4";
+const DEFAULT_MODEL: &str = "gpt-4.1";
+const DEFAULT_CODEX_MODEL: &str = "gpt-5.4";
+const API_KEY_FALLBACK_MODELS: &[&str] = &[DEFAULT_MODEL];
+const CODEX_FALLBACK_MODELS: &[&str] = &[DEFAULT_CODEX_MODEL];
 const OPENAI_CHAT_COMPLETIONS_URL: &str = "https://api.openai.com/v1/chat/completions";
+const OPENAI_MODELS_URL: &str = "https://api.openai.com/v1/models";
 const CHATGPT_CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
+const CHATGPT_CODEX_MODELS_URL: &str =
+    "https://chatgpt.com/backend-api/codex/models?client_version=0.0.0";
 const CODEX_INSTRUCTIONS: &str =
     "You are cawir, a minimal coding agent. Answer plainly and use available tools when needed.";
 const AUTH_OPTIONS: &[AuthOption] = &[
@@ -165,6 +170,27 @@ struct ResponseToolCallFunction {
     arguments: String,
 }
 
+#[derive(Deserialize, Debug)]
+struct ModelsResponse {
+    data: Vec<ModelInfo>,
+}
+
+#[derive(Deserialize, Debug)]
+struct ModelInfo {
+    id: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct CodexModelsResponse {
+    models: Vec<CodexModelInfo>,
+}
+
+#[derive(Deserialize, Debug)]
+struct CodexModelInfo {
+    slug: String,
+    visibility: String,
+}
+
 impl Provider for OpenAi {
     fn name(&self) -> &'static str {
         "openai"
@@ -174,21 +200,73 @@ impl Provider for OpenAi {
         AUTH_OPTIONS
     }
 
+    fn default_model(&self, credential: &ActiveCredential) -> &'static str {
+        if credential.option_name() == "codex-oauth" {
+            DEFAULT_CODEX_MODEL
+        } else {
+            DEFAULT_MODEL
+        }
+    }
+
+    async fn available_models(
+        &self,
+        client: &reqwest::Client,
+        credential: &ActiveCredential,
+    ) -> Result<Vec<String>> {
+        if credential.option_name() == "codex-oauth" {
+            return self.available_codex_oauth_models(client, credential).await;
+        }
+
+        let response = credential
+            .attach(client.get(OPENAI_MODELS_URL))
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await?;
+            return Err(Error::Api {
+                provider: self.name().to_string(),
+                status,
+                body,
+            });
+        }
+
+        let parsed: ModelsResponse = response.json().await?;
+        let mut models = parsed
+            .data
+            .into_iter()
+            .map(|model| model.id)
+            .filter(|id| is_chat_completions_model(id))
+            .collect::<Vec<_>>();
+        models.sort();
+        Ok(models)
+    }
+
+    fn fallback_models(&self, credential: &ActiveCredential) -> &'static [&'static str] {
+        if credential.option_name() == "codex-oauth" {
+            CODEX_FALLBACK_MODELS
+        } else {
+            API_KEY_FALLBACK_MODELS
+        }
+    }
+
     async fn send(
         &self,
         client: &reqwest::Client,
         credential: &ActiveCredential,
+        model: &str,
         messages: &[Message],
         tools: Vec<ToolDefinition>,
     ) -> Result<ProviderResponse> {
         if credential.option_name() == "codex-oauth" {
             return self
-                .send_codex_oauth(client, credential, messages, tools)
+                .send_codex_oauth(client, credential, model, messages, tools)
                 .await;
         }
 
         let req = ChatRequest {
-            model: MODEL.to_string(),
+            model: model.to_string(),
             messages: to_openai_messages(messages),
             tools: tools.into_iter().map(OpenAiTool::from).collect(),
         };
@@ -233,15 +311,47 @@ impl Provider for OpenAi {
 }
 
 impl OpenAi {
+    async fn available_codex_oauth_models(
+        &self,
+        client: &reqwest::Client,
+        credential: &ActiveCredential,
+    ) -> Result<Vec<String>> {
+        let response = credential
+            .attach(client.get(CHATGPT_CODEX_MODELS_URL))
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await?;
+            return Err(Error::Api {
+                provider: self.name().to_string(),
+                status,
+                body,
+            });
+        }
+
+        let parsed: CodexModelsResponse = response.json().await?;
+        let mut models = parsed
+            .models
+            .into_iter()
+            .filter(|model| model.visibility == "list")
+            .map(|model| model.slug)
+            .collect::<Vec<_>>();
+        models.sort();
+        Ok(models)
+    }
+
     async fn send_codex_oauth(
         &self,
         client: &reqwest::Client,
         credential: &ActiveCredential,
+        model: &str,
         messages: &[Message],
         tools: Vec<ToolDefinition>,
     ) -> Result<ProviderResponse> {
         let req = ResponsesRequest {
-            model: CODEX_MODEL.to_string(),
+            model: model.to_string(),
             instructions: CODEX_INSTRUCTIONS.to_string(),
             input: to_responses_items(messages),
             tools: tools.into_iter().map(ResponsesTool::from).collect(),
@@ -323,6 +433,19 @@ fn to_openai_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
             _ => Vec::new(),
         })
         .collect()
+}
+
+fn is_chat_completions_model(id: &str) -> bool {
+    (id.starts_with("gpt-") || id.starts_with("o1") || id.starts_with("o3") || id.starts_with("o4"))
+        && !id.contains("audio")
+        && !id.contains("realtime")
+        && !id.contains("transcribe")
+        && !id.contains("tts")
+        && !id.contains("image")
+        && !id.contains("search")
+        && !id.contains("embedding")
+        && !id.contains("moderation")
+        && !id.contains("deep-research")
 }
 
 fn to_responses_items(messages: &[Message]) -> Vec<ResponsesItem> {
@@ -827,7 +950,7 @@ mod tests {
     #[test]
     fn codex_responses_request_includes_required_instructions() {
         let req = ResponsesRequest {
-            model: CODEX_MODEL.to_string(),
+            model: DEFAULT_CODEX_MODEL.to_string(),
             instructions: CODEX_INSTRUCTIONS.to_string(),
             input: Vec::new(),
             tools: Vec::new(),

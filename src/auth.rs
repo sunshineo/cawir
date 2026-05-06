@@ -63,6 +63,8 @@ enum CredentialSource {
 pub(crate) struct ProviderPreference {
     pub(crate) provider: String,
     pub(crate) auth_option: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) models: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -306,16 +308,12 @@ pub(crate) fn load_provider_preference() -> Result<Option<ProviderPreference>> {
         .map_err(|error| Error::Env(format!("failed to parse {}: {error}", path.display())))
 }
 
-pub(crate) fn save_provider_preference(provider: &str, auth_option: &str) -> Result<()> {
+pub(crate) fn save_provider_preference(preference: &ProviderPreference) -> Result<()> {
     let path = provider_config_path()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    let preference = ProviderPreference {
-        provider: provider.to_string(),
-        auth_option: auth_option.to_string(),
-    };
     let contents =
         serde_json::to_string_pretty(&preference).map_err(|error| Error::Env(error.to_string()))?;
     fs::write(path, contents)?;
@@ -679,5 +677,20 @@ mod tests {
         let path = project_config_dir().unwrap();
 
         assert!(path.to_string_lossy().contains("cawir"));
+    }
+
+    #[test]
+    fn provider_preference_deserializes_without_models_for_backward_compatibility() {
+        let preference: ProviderPreference = serde_json::from_str(
+            r#"{
+                "provider": "ollama",
+                "auth_option": "none"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(preference.provider, "ollama");
+        assert_eq!(preference.auth_option, "none");
+        assert!(preference.models.is_empty());
     }
 }

@@ -8,6 +8,9 @@ use crate::{
 };
 
 const MAX_OUTPUT_TOKENS: u32 = 16_384;
+const DEFAULT_MODEL: &str = "claude-haiku-4-5-20251001";
+const FALLBACK_MODELS: &[&str] = &[DEFAULT_MODEL];
+const MODELS_URL: &str = "https://api.anthropic.com/v1/models";
 const AUTH_OPTIONS: &[AuthOption] = &[AuthOption::ApiKey(ApiKeyCredential {
     env_var: "ANTHROPIC_API_KEY",
     storage_key: "anthropic-api-key",
@@ -36,6 +39,16 @@ struct MessageResponse {
     content: Vec<MessageContent>,
 }
 
+#[derive(Deserialize, Debug)]
+struct ModelsResponse {
+    data: Vec<ModelInfo>,
+}
+
+#[derive(Deserialize, Debug)]
+struct ModelInfo {
+    id: String,
+}
+
 impl Provider for Anthropic {
     fn name(&self) -> &'static str {
         "anthropic"
@@ -45,15 +58,49 @@ impl Provider for Anthropic {
         AUTH_OPTIONS
     }
 
+    fn default_model(&self, _credential: &ActiveCredential) -> &'static str {
+        DEFAULT_MODEL
+    }
+
+    async fn available_models(
+        &self,
+        client: &reqwest::Client,
+        credential: &ActiveCredential,
+    ) -> Result<Vec<String>> {
+        let response = credential
+            .attach(client.get(MODELS_URL))
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await?;
+            return Err(Error::Api {
+                provider: self.name().to_string(),
+                status,
+                body,
+            });
+        }
+
+        let parsed: ModelsResponse = response.json().await?;
+        Ok(parsed.data.into_iter().map(|model| model.id).collect())
+    }
+
+    fn fallback_models(&self, _credential: &ActiveCredential) -> &'static [&'static str] {
+        FALLBACK_MODELS
+    }
+
     async fn send(
         &self,
         client: &reqwest::Client,
         credential: &ActiveCredential,
+        model: &str,
         messages: &[Message],
         tools: Vec<ToolDefinition>,
     ) -> Result<ProviderResponse> {
         let req = MessageRequest {
-            model: "claude-haiku-4-5-20251001".to_string(),
+            model: model.to_string(),
             max_tokens: MAX_OUTPUT_TOKENS,
             cache_control: CacheControl {
                 kind: "ephemeral".to_string(),

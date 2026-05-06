@@ -1,4 +1,7 @@
-use std::io::{self, ErrorKind, Write};
+use std::{
+    collections::BTreeMap,
+    io::{self, ErrorKind, Write},
+};
 
 use crate::{
     Error, Result, agent,
@@ -36,17 +39,58 @@ impl Provider for ActiveProvider {
         }
     }
 
+    fn default_model(&self, credential: &ActiveCredential) -> &'static str {
+        match self {
+            Self::Anthropic(provider) => provider.default_model(credential),
+            Self::Ollama(provider) => provider.default_model(credential),
+            Self::OpenAi(provider) => provider.default_model(credential),
+        }
+    }
+
+    async fn available_models(
+        &self,
+        client: &reqwest::Client,
+        credential: &ActiveCredential,
+    ) -> Result<Vec<String>> {
+        match self {
+            Self::Anthropic(provider) => provider.available_models(client, credential).await,
+            Self::Ollama(provider) => provider.available_models(client, credential).await,
+            Self::OpenAi(provider) => provider.available_models(client, credential).await,
+        }
+    }
+
+    fn fallback_models(&self, credential: &ActiveCredential) -> &'static [&'static str] {
+        match self {
+            Self::Anthropic(provider) => provider.fallback_models(credential),
+            Self::Ollama(provider) => provider.fallback_models(credential),
+            Self::OpenAi(provider) => provider.fallback_models(credential),
+        }
+    }
+
     async fn send(
         &self,
         client: &reqwest::Client,
         credential: &ActiveCredential,
+        model: &str,
         messages: &[Message],
         tools: Vec<crate::provider::ToolDefinition>,
     ) -> Result<crate::provider::ProviderResponse> {
         match self {
-            Self::Anthropic(provider) => provider.send(client, credential, messages, tools).await,
-            Self::Ollama(provider) => provider.send(client, credential, messages, tools).await,
-            Self::OpenAi(provider) => provider.send(client, credential, messages, tools).await,
+            Self::Anthropic(provider) => {
+                provider
+                    .send(client, credential, model, messages, tools)
+                    .await
+            }
+            Self::Ollama(provider) => {
+                provider
+                    .send(client, credential, model, messages, tools)
+                    .await
+            }
+            Self::OpenAi(provider) => {
+                provider
+                    .send(client, credential, model, messages, tools)
+                    .await
+            }
         }
     }
 }
@@ -57,7 +101,14 @@ pub async fn run() -> Result<()> {
     let client = reqwest::Client::builder().user_agent("cawir/0.1").build()?;
     let preference = load_provider_preference()?;
     let (mut provider, mut credential) = startup_provider(preference.as_ref(), &client).await?;
-    save_provider_preference(provider.name(), credential.option_name())?;
+    let mut model_preferences = preference
+        .as_ref()
+        .map(|preference| preference.models.clone())
+        .unwrap_or_default();
+    let mut model = model_for_provider(&provider, &credential, &model_preferences);
+    model_preferences.insert(model_preference_key(&provider, &credential), model.clone());
+    save_current_preference(&provider, &credential, &model_preferences)?;
+    print_active_provider(&provider, &credential, &model);
 
     let mut history: Vec<Message> = Vec::new();
 
@@ -79,8 +130,28 @@ pub async fn run() -> Result<()> {
             "/help" => print_help(),
             other => {
                 if other.split_whitespace().next() == Some("/provider") {
-                    if let Err(error) =
-                        switch_provider(other, &mut provider, &mut credential, &client).await
+                    if let Err(error) = switch_provider(
+                        other,
+                        &mut provider,
+                        &mut credential,
+                        &mut model,
+                        &mut model_preferences,
+                        &client,
+                    )
+                    .await
+                    {
+                        println!("{}", error);
+                    }
+                } else if other.split_whitespace().next() == Some("/model") {
+                    if let Err(error) = switch_model(
+                        other,
+                        &provider,
+                        &credential,
+                        &mut model,
+                        &mut model_preferences,
+                        &client,
+                    )
+                    .await
                     {
                         println!("{}", error);
                     }
@@ -91,7 +162,7 @@ pub async fn run() -> Result<()> {
                     history.push(Message::user_text(other));
 
                     if let Err(e) =
-                        agent::run_turn(&provider, &client, &credential, &mut history).await
+                        agent::run_turn(&provider, &client, &credential, &model, &mut history).await
                     {
                         eprintln!("error: {}", e);
                         history.truncate(history_len_before_turn);
@@ -175,6 +246,44 @@ async fn credential_for_provider(
     acquire_credential_for_provider(provider, client).await
 }
 
+fn model_for_provider(
+    provider: &impl Provider,
+    credential: &ActiveCredential,
+    model_preferences: &BTreeMap<String, String>,
+) -> String {
+    let key = model_preference_key(provider, credential);
+    model_preferences
+        .get(&key)
+        .or_else(|| model_preferences.get(provider.name()))
+        .cloned()
+        .unwrap_or_else(|| provider.default_model(credential).to_string())
+}
+
+fn save_current_preference(
+    provider: &impl Provider,
+    credential: &ActiveCredential,
+    model_preferences: &BTreeMap<String, String>,
+) -> Result<()> {
+    let mut models = model_preferences.clone();
+    models
+        .entry(model_preference_key(provider, credential))
+        .or_insert_with(|| provider.default_model(credential).to_string());
+
+    save_provider_preference(&ProviderPreference {
+        provider: provider.name().to_string(),
+        auth_option: credential.option_name().to_string(),
+        models,
+    })
+}
+
+fn model_preference_key(provider: &impl Provider, credential: &ActiveCredential) -> String {
+    model_preference_key_parts(provider.name(), credential.option_name())
+}
+
+fn model_preference_key_parts(provider: &str, auth_option: &str) -> String {
+    format!("{provider}:{auth_option}")
+}
+
 async fn try_credential_for_provider(
     provider: &impl Provider,
     preference: Option<&ProviderPreference>,
@@ -201,6 +310,8 @@ async fn switch_provider(
     input: &str,
     provider: &mut ActiveProvider,
     active_credential: &mut ActiveCredential,
+    model: &mut String,
+    model_preferences: &mut BTreeMap<String, String>,
     client: &reqwest::Client,
 ) -> std::result::Result<(), String> {
     let mut words = input.split_whitespace();
@@ -232,6 +343,7 @@ async fn switch_provider(
             .map(|auth_option| ProviderPreference {
                 provider: new_provider.name().to_string(),
                 auth_option: auth_option.to_string(),
+                models: model_preferences.clone(),
             })
             .or(load_provider_preference().map_err(|error| error.to_string())?);
 
@@ -242,15 +354,14 @@ async fn switch_provider(
 
     *provider = new_provider;
     *active_credential = new_credential;
-    save_provider_preference(provider.name(), active_credential.option_name())
+    *model = model_for_provider(provider, active_credential, model_preferences);
+    model_preferences.insert(
+        model_preference_key(provider, active_credential),
+        model.clone(),
+    );
+    save_current_preference(provider, active_credential, model_preferences)
         .map_err(|error| error.to_string())?;
 
-    println!(
-        "provider: {} ({} from {})",
-        provider.name(),
-        active_credential.option_name(),
-        active_credential.source_name()
-    );
     println!(
         "note: existing conversation history will be sent to {} on the next turn",
         provider.name()
@@ -292,7 +403,6 @@ async fn acquire_credential_for_provider_with_option(
             let credential =
                 resolve_for_provider(provider.name(), provider.auth_options(), None, client)
                     .await?;
-            save_provider_preference(provider.name(), credential.option_name())?;
             Ok(credential)
         }
         AuthOption::ApiKey(_) => {
@@ -303,12 +413,10 @@ async fn acquire_credential_for_provider_with_option(
             );
             let api_key = rpassword::prompt_password(prompt)?;
             let credential = save_api_key(option, api_key.trim())?;
-            save_provider_preference(provider.name(), credential.option_name())?;
             Ok(credential)
         }
         AuthOption::CodexOAuth(_) => {
             let credential = acquire_codex_oauth(option, client).await?;
-            save_provider_preference(provider.name(), credential.option_name())?;
             Ok(credential)
         }
     }
@@ -360,9 +468,83 @@ fn prompt_provider() -> Result<ActiveProvider> {
 fn print_help() {
     println!("  /exit                quit the REPL");
     println!("  /help                show this help");
+    println!("  /model               show current model");
+    println!("  /model <name>        switch model for the current provider");
     println!("  /provider            list providers");
     println!("  /provider <name>     switch providers");
     println!("  /provider <name> <credential-option> --reset");
+}
+
+async fn switch_model(
+    input: &str,
+    provider: &ActiveProvider,
+    credential: &ActiveCredential,
+    model: &mut String,
+    model_preferences: &mut BTreeMap<String, String>,
+    client: &reqwest::Client,
+) -> std::result::Result<(), String> {
+    let mut words = input.split_whitespace();
+    let _command = words.next();
+
+    let Some(new_model) = words.next() else {
+        print_model(provider, credential, model, client).await;
+        return Ok(());
+    };
+
+    if words.next().is_some() {
+        return Err(model_usage());
+    }
+
+    *model = new_model.to_string();
+    model_preferences.insert(model_preference_key(provider, credential), model.clone());
+    save_current_preference(provider, credential, model_preferences)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+async fn print_model(
+    provider: &ActiveProvider,
+    credential: &ActiveCredential,
+    model: &str,
+    client: &reqwest::Client,
+) {
+    println!("current provider: {}", provider.name());
+    println!("current model: {}", model);
+    println!(
+        "default model for {}: {}",
+        provider.name(),
+        provider.default_model(credential)
+    );
+    match provider.available_models(client, credential).await {
+        Ok(models) if models.is_empty() => {
+            println!("available models: none returned by provider");
+        }
+        Ok(models) => {
+            println!("available models:");
+            for available_model in models {
+                println!("  {}", available_model);
+            }
+        }
+        Err(error) => {
+            println!("available models: failed to query provider: {}", error);
+            println!("fallback models:");
+            for fallback_model in provider.fallback_models(credential) {
+                println!("  {}", fallback_model);
+            }
+        }
+    }
+    println!();
+    println!("use: /model <name>");
+}
+
+fn print_active_provider(provider: &impl Provider, credential: &ActiveCredential, model: &str) {
+    println!(
+        "provider: {} ({} from {})",
+        provider.name(),
+        credential.option_name(),
+        credential.source_name()
+    );
+    println!("model: {}", model);
 }
 
 fn print_providers(provider: &ActiveProvider) {
@@ -398,4 +580,26 @@ fn print_available_providers() {
 
 fn provider_usage() -> String {
     "usage: /provider <anthropic|openai|ollama> [none|api-key|codex-oauth] [--reset]".to_string()
+}
+
+fn model_usage() -> String {
+    "usage: /model [model-name]".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_preference_key_includes_provider_and_auth_option() {
+        assert_eq!(
+            model_preference_key_parts("openai", "api-key"),
+            "openai:api-key"
+        );
+        assert_eq!(
+            model_preference_key_parts("openai", "codex-oauth"),
+            "openai:codex-oauth"
+        );
+        assert_eq!(model_preference_key_parts("ollama", "none"), "ollama:none");
+    }
 }

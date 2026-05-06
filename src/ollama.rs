@@ -10,8 +10,10 @@ use crate::{
     session::{Message, MessageContent},
 };
 
-const MODEL: &str = "qwen3:8b";
+const DEFAULT_MODEL: &str = "qwen3:8b";
+const FALLBACK_MODELS: &[&str] = &[DEFAULT_MODEL];
 const OLLAMA_CHAT_URL: &str = "http://localhost:11434/api/chat";
+const OLLAMA_TAGS_URL: &str = "http://localhost:11434/api/tags";
 const AUTH_OPTIONS: &[AuthOption] = &[AuthOption::None];
 
 pub(crate) struct Ollama;
@@ -70,6 +72,16 @@ struct ChatResponse {
     message: OllamaMessage,
 }
 
+#[derive(Deserialize, Debug)]
+struct TagsResponse {
+    models: Vec<TagModel>,
+}
+
+#[derive(Deserialize, Debug)]
+struct TagModel {
+    name: String,
+}
+
 impl Provider for Ollama {
     fn name(&self) -> &'static str {
         "ollama"
@@ -79,15 +91,50 @@ impl Provider for Ollama {
         AUTH_OPTIONS
     }
 
+    fn default_model(&self, _credential: &ActiveCredential) -> &'static str {
+        DEFAULT_MODEL
+    }
+
+    async fn available_models(
+        &self,
+        client: &reqwest::Client,
+        _credential: &ActiveCredential,
+    ) -> Result<Vec<String>> {
+        let response = client.get(OLLAMA_TAGS_URL).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await?;
+            return Err(Error::Api {
+                provider: self.name().to_string(),
+                status,
+                body,
+            });
+        }
+
+        let parsed: TagsResponse = response.json().await?;
+        let mut models = parsed
+            .models
+            .into_iter()
+            .map(|model| model.name)
+            .collect::<Vec<_>>();
+        models.sort();
+        Ok(models)
+    }
+
+    fn fallback_models(&self, _credential: &ActiveCredential) -> &'static [&'static str] {
+        FALLBACK_MODELS
+    }
+
     async fn send(
         &self,
         client: &reqwest::Client,
         credential: &ActiveCredential,
+        model: &str,
         messages: &[Message],
         tools: Vec<ToolDefinition>,
     ) -> Result<ProviderResponse> {
         let req = ChatRequest {
-            model: MODEL.to_string(),
+            model: model.to_string(),
             messages: to_ollama_messages(messages),
             tools: tools.into_iter().map(OllamaTool::from).collect(),
             stream: false,

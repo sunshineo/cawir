@@ -12,13 +12,14 @@ pub(crate) async fn run_turn<P: Provider>(
     provider: &P,
     client: &reqwest::Client,
     credential: &ActiveCredential,
+    model: &str,
     history: &mut Vec<Message>,
 ) -> Result<()> {
     let mut tool_rounds = 0;
 
     loop {
         match provider
-            .send(client, credential, history, tools::definitions())
+            .send(client, credential, model, history, tools::definitions())
             .await?
         {
             ProviderResponse::Text(reply) => {
