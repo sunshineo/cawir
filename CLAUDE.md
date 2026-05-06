@@ -14,6 +14,7 @@ The target is *not* to compete with Claude Code or Cursor. The target is a small
 - [`docs/status.md`](docs/status.md) tracks the current implementation state and what is next.
 - [`docs/roadmap.md`](docs/roadmap.md) defines the checkpoint sequence and scope.
 - [`docs/architecture.md`](docs/architecture.md) describes the target component design and extension seams.
+- [`docs/testing.md`](docs/testing.md) lists offline and live provider test commands.
 - `learnings-rust/*.md` stores durable Rust notes organized by topic.
 - `learnings-agent/*.md` stores durable coding-agent design notes organized by topic.
 
@@ -61,6 +62,26 @@ Every implementation step is a teaching opportunity. The trails of `learnings-ru
 - **Profile:** `default` — ships `rustc`, `cargo`, `rust-std`, `rust-docs`, `rustfmt`, `clippy`. Use all four tools from day one.
 - **PATH:** `~/.cargo/bin` added via `~/.zshenv` (not `~/.zshrc`) so non-interactive shells/cron/launchd/subprocesses also see cargo.
 - **Linter policy:** run `cargo clippy` regularly while learning — its suggestions are one of the best free Rust tutors. `cargo fmt` before committing.
+
+### Testing
+
+Always run the offline checks before finishing code changes:
+
+```sh
+cargo fmt --check
+cargo test
+cargo clippy --all-targets -- -D warnings
+```
+
+Live provider smoke tests are ignored by default because they use real credentials, network access, and provider quota. When changing provider wire format, auth resolution, credential refresh, or request/response parsing, run the relevant matrix command:
+
+```sh
+PROVIDER=anthropic AUTH_OPTION=api-key cargo test live_smoke -- --ignored --nocapture
+PROVIDER=openai AUTH_OPTION=api-key cargo test live_smoke -- --ignored --nocapture
+PROVIDER=openai AUTH_OPTION=codex-oauth cargo test live_smoke -- --ignored --nocapture
+```
+
+The live test uses the same credential lookup order as the REPL: `credentials.json` → environment → `.env`.
 
 ### Editor / IDE (decided 2026-04-23)
 

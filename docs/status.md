@@ -5,6 +5,7 @@ This document tracks the current implementation state and recent progress.
 - Stable collaboration rules live in [`../AGENTS.md`](../AGENTS.md) / [`../CLAUDE.md`](../CLAUDE.md).
 - Checkpoint sequence and scope live in [`roadmap.md`](roadmap.md).
 - Target design and extension seams live in [`architecture.md`](architecture.md).
+- Test commands live in [`testing.md`](testing.md).
 
 ## Snapshot (as of 2026-05-05)
 
@@ -54,9 +55,10 @@ This document tracks the current implementation state and recent progress.
 - `4a` completed on 2026-05-05. Added concrete OpenAI chat-completions support and extracted the shared `Provider` trait from Anthropic/OpenAI duplication. `ActiveProvider` uses explicit enum delegation for now instead of `Box<dyn Provider>`.
 - `4b` completed on 2026-05-05. Added `/provider <anthropic|openai>` as the first argument-taking slash command. Bare `/provider` lists the current and available providers. The REPL now mutates the active provider and API key together, reports bad command usage or missing credentials as user-facing errors, warns that existing history carries across providers, and keeps the session running.
 - `4c` completed on 2026-05-05. Added `auth.rs` with concrete `AuthOption` variants for `ApiKey` and `CodexOAuth`; providers now declare accepted credential options and request attachment moved out of provider wire code. Credential resolution checks an OS-appropriate `credentials.json` first, then environment/`.env`; missing credentials can be acquired and saved through a hidden API-key prompt or OpenAI Codex OAuth device-code login. The selected provider and credential option are remembered in `provider.json`; secrets are stored in `credentials.json` with `0600` permissions on Unix. Codex OAuth stores ChatGPT OAuth tokens, refreshes the access token when needed, and routes requests to the ChatGPT Codex backend rather than trying to exchange the device-code `id_token` for an API-key-style model token. The Codex backend requires `stream: true`, so cawir currently collects the SSE response internally and still returns a normal provider response to the agent loop.
+- Live provider smoke tests are available as ignored tests for Anthropic API key, OpenAI API key, and OpenAI Codex OAuth. See `docs/testing.md` for the opt-in commands.
 
 ## Learnings
 
-- `learnings-rust/` currently includes notes `01` through `29`.
+- `learnings-rust/` currently includes notes `01` through `30`.
 - `learnings-agent/` currently includes notes `01` through `06`.
 - New Rust discussions should be distilled into `learnings-rust/*.md`; new agent-design discussions should be distilled into `learnings-agent/*.md`.
