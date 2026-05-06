@@ -12,6 +12,7 @@ use crate::{
     },
     ollama::Ollama,
     openai::OpenAi,
+    policy::PermissionMode,
     provider::Provider,
     session::Message,
 };
@@ -111,6 +112,8 @@ pub async fn run() -> Result<()> {
     print_active_provider(&provider, &credential, &model);
 
     let mut history: Vec<Message> = Vec::new();
+    let mut mode = PermissionMode::Default;
+    println!("mode: {}", mode.name());
 
     loop {
         print!("cawir> ");
@@ -155,14 +158,25 @@ pub async fn run() -> Result<()> {
                     {
                         println!("{}", error);
                     }
+                } else if other.split_whitespace().next() == Some("/mode") {
+                    if let Err(error) = switch_mode(other, &mut mode) {
+                        println!("{}", error);
+                    }
                 } else if other.starts_with('/') {
                     println!("unknown command: {}", other);
                 } else {
                     let history_len_before_turn = history.len();
                     history.push(Message::user_text(other));
 
-                    if let Err(e) =
-                        agent::run_turn(&provider, &client, &credential, &model, &mut history).await
+                    if let Err(e) = run_agent_until_complete(
+                        &provider,
+                        &client,
+                        &credential,
+                        &model,
+                        &mut mode,
+                        &mut history,
+                    )
+                    .await
                     {
                         eprintln!("error: {}", e);
                         history.truncate(history_len_before_turn);
@@ -173,6 +187,61 @@ pub async fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn run_agent_until_complete<P: Provider>(
+    provider: &P,
+    client: &reqwest::Client,
+    credential: &ActiveCredential,
+    model: &str,
+    mode: &mut PermissionMode,
+    history: &mut Vec<Message>,
+) -> Result<()> {
+    loop {
+        match agent::run_turn(provider, client, credential, model, *mode, history).await? {
+            agent::TurnOutcome::Complete => return Ok(()),
+            agent::TurnOutcome::PlanReady(plan_ready) => {
+                println!();
+                println!("proposed plan:");
+                println!("{}", plan_ready.plan);
+                if approve_plan_interactively()? {
+                    *mode = PermissionMode::Default;
+                    println!("mode: {}", (*mode).name());
+                    if let Some(tool_use_id) = plan_ready.tool_use_id {
+                        history.push(Message::user_tool_result(
+                            tool_use_id,
+                            "plan approved; continue in default mode".to_string(),
+                        ));
+                    } else {
+                        return Ok(());
+                    }
+                } else {
+                    if let Some(tool_use_id) = plan_ready.tool_use_id {
+                        history.push(Message::user_tool_results(vec![
+                            crate::session::ToolResult {
+                                tool_use_id,
+                                content: "plan denied by user; stay in plan mode".to_string(),
+                                is_error: true,
+                            },
+                        ]));
+                    } else {
+                        println!("mode: {}", (*mode).name());
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn approve_plan_interactively() -> Result<bool> {
+    print!("approve plan and switch to default mode? [y/N] ");
+    io::stdout().flush()?;
+
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES"))
 }
 
 fn load_dotenv() -> Result<()> {
@@ -468,11 +537,44 @@ fn prompt_provider() -> Result<ActiveProvider> {
 fn print_help() {
     println!("  /exit                quit the REPL");
     println!("  /help                show this help");
+    println!("  /mode                show current permission mode");
+    println!("  /mode <name>         switch permission modes");
     println!("  /model               show current model");
     println!("  /model <name>        switch model for the current provider");
     println!("  /provider            list providers");
     println!("  /provider <name>     switch providers");
     println!("  /provider <name> <credential-option> --reset");
+}
+
+fn switch_mode(input: &str, mode: &mut PermissionMode) -> std::result::Result<(), String> {
+    let mut words = input.split_whitespace();
+    let _command = words.next();
+
+    let Some(mode_name) = words.next() else {
+        print_mode(*mode);
+        return Ok(());
+    };
+
+    if words.next().is_some() {
+        return Err(mode_usage());
+    }
+
+    let Some(new_mode) = PermissionMode::parse(mode_name) else {
+        return Err(format!("unknown mode: {mode_name}\n{}", mode_usage()));
+    };
+
+    *mode = new_mode;
+    print_mode(*mode);
+    Ok(())
+}
+
+fn print_mode(mode: PermissionMode) {
+    println!("current mode: {}", mode.name());
+    println!("available modes:");
+    println!("  default");
+    println!("  plan");
+    println!("  accept-edits");
+    println!("  bypass");
 }
 
 async fn switch_model(
@@ -586,6 +688,10 @@ fn model_usage() -> String {
     "usage: /model [model-name]".to_string()
 }
 
+fn mode_usage() -> String {
+    "usage: /mode [default|plan|accept-edits|bypass]".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -601,5 +707,23 @@ mod tests {
             "openai:codex-oauth"
         );
         assert_eq!(model_preference_key_parts("ollama", "none"), "ollama:none");
+    }
+
+    #[test]
+    fn switch_mode_accepts_known_modes() {
+        let mut mode = PermissionMode::Default;
+
+        switch_mode("/mode plan", &mut mode).unwrap();
+
+        assert_eq!(mode, PermissionMode::Plan);
+    }
+
+    #[test]
+    fn switch_mode_rejects_unknown_modes() {
+        let mut mode = PermissionMode::Default;
+        let error = switch_mode("/mode turbo", &mut mode).unwrap_err();
+
+        assert!(error.contains("unknown mode: turbo"));
+        assert_eq!(mode, PermissionMode::Default);
     }
 }

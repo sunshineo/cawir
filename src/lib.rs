@@ -4,6 +4,7 @@ mod auth;
 pub mod error;
 mod ollama;
 mod openai;
+mod policy;
 mod provider;
 mod repl;
 pub mod session;

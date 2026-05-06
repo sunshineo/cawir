@@ -92,3 +92,80 @@ Keeping separate enums makes the code say what it means:
 Rust's `match` is exhaustive. If a new variant is added to an enum, the compiler points to every `match` that needs to decide what to do with it.
 
 That makes enums a good fit for explicit state machines and protocol branches. Instead of representing state with loose strings or booleans, the type system carries the possible cases.
+
+## Permission modes as a state machine
+
+Checkpoint 5 added another control-flow enum:
+
+```rust
+pub(crate) enum PermissionMode {
+    Default,
+    Plan,
+    AcceptEdits,
+    Bypass,
+}
+```
+
+This is a good enum because cawir is in exactly one permission state at a time, and the set of states is intentionally small and named.
+
+The important part is not just the enum. It is where the enum gets matched:
+
+```rust
+match mode {
+    PermissionMode::Default => { ... }
+    PermissionMode::Plan => { ... }
+    PermissionMode::AcceptEdits => { ... }
+    PermissionMode::Bypass => { ... }
+}
+```
+
+For permission logic, exhaustive matching is a safety feature. If a future checkpoint adds:
+
+```rust
+PermissionMode::Auto
+```
+
+then every policy decision that matches on `PermissionMode` must be updated before the program compiles. That is better than using strings like `"default"` or booleans like `auto_approve_edits`, where adding a new state can silently fall through to the wrong behavior.
+
+Avoid using `_` for important enum policy matches:
+
+```rust
+match mode {
+    PermissionMode::Default => PermissionDecision::AskUser,
+    _ => PermissionDecision::Allow,
+}
+```
+
+This compiles, but it weakens the safety. If `PermissionMode::Auto` is added later, the compiler will not force a conscious decision for it because `_` already catches it.
+
+Rule of thumb: for closed state machines, list each variant by name. Use `_` only when the exact remaining cases genuinely do not matter.
+
+## Data-bearing control outcomes
+
+Checkpoint 5 also introduced a control-flow enum with data:
+
+```rust
+pub(crate) enum TurnOutcome {
+    Complete,
+    PlanReady(PlanReady),
+}
+```
+
+`Complete` means the agent turn is done. `PlanReady(PlanReady)` means the agent loop has reached a boundary where the REPL needs to ask the user whether to approve a plan.
+
+This is different from returning only `Result<()>`. `Result` says whether the function succeeded or failed. `TurnOutcome` says what successful thing happened and what the caller should do next.
+
+That shape is common in Rust:
+
+```text
+Result<TurnOutcome, Error>
+```
+
+Read it as:
+
+```text
+The operation can fail with Error.
+If it succeeds, it still has one of several meaningful outcomes.
+```
+
+Keeping this as an enum makes the caller handle each successful branch explicitly.

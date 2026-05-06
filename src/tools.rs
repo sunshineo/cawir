@@ -7,17 +7,36 @@ use serde_json::{Value, json};
 
 use crate::{
     Error, Result,
+    policy::{PermissionDecision, PermissionMode, ToolKind, permission_decision},
     provider::ToolDefinition,
     session::{MessageContent, ToolResult},
 };
 
-pub(crate) fn definitions() -> Vec<ToolDefinition> {
-    vec![
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PlanReady {
+    pub(crate) tool_use_id: Option<String>,
+    pub(crate) plan: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ToolExecution {
+    pub(crate) results: Vec<ToolResult>,
+    pub(crate) plan_ready: Option<PlanReady>,
+}
+
+pub(crate) fn definitions(mode: PermissionMode) -> Vec<ToolDefinition> {
+    let mut definitions = vec![
         list_files_tool(),
         read_file_tool(),
         write_file_tool(),
         shell_tool(),
-    ]
+    ];
+
+    if mode == PermissionMode::Plan {
+        definitions.push(exit_plan_mode_tool());
+    }
+
+    definitions
 }
 
 fn read_file_tool() -> ToolDefinition {
@@ -96,8 +115,27 @@ fn shell_tool() -> ToolDefinition {
     }
 }
 
-pub(crate) fn execute_tool_uses(blocks: &[MessageContent]) -> Vec<ToolResult> {
+fn exit_plan_mode_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "exit_plan_mode".to_string(),
+        description: "Submit a concise implementation plan for user approval. Use this when you are in plan mode and ready to ask permission to make changes.".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "plan": {
+                    "type": "string",
+                    "description": "The proposed plan to show to the user before making changes."
+                }
+            },
+            "required": ["plan"],
+            "additionalProperties": false
+        }),
+    }
+}
+
+pub(crate) fn execute_tool_uses(blocks: &[MessageContent], mode: PermissionMode) -> ToolExecution {
     let mut results = Vec::new();
+    let mut plan_ready = None;
 
     for block in blocks {
         match block {
@@ -106,7 +144,30 @@ pub(crate) fn execute_tool_uses(blocks: &[MessageContent]) -> Vec<ToolResult> {
             }
             MessageContent::ToolUse { id, name, input } => {
                 println!("tool request: {} ({})", name, id);
-                let result = match execute_tool_call(name, input) {
+                if name == "exit_plan_mode" {
+                    match plan_from_exit_plan_mode(input) {
+                        Ok(plan) => {
+                            println!("plan ready for approval");
+                            plan_ready = Some(PlanReady {
+                                tool_use_id: Some(id.clone()),
+                                plan,
+                            });
+                            continue;
+                        }
+                        Err(error) => {
+                            let content = error.to_string();
+                            print_tool_error(name, &content);
+                            results.push(ToolResult {
+                                tool_use_id: id.clone(),
+                                content,
+                                is_error: true,
+                            });
+                            continue;
+                        }
+                    }
+                }
+
+                let result = match execute_tool_call(name, input, mode) {
                     Ok(content) => {
                         print_tool_result(name, &content);
                         ToolResult {
@@ -131,15 +192,24 @@ pub(crate) fn execute_tool_uses(blocks: &[MessageContent]) -> Vec<ToolResult> {
         }
     }
 
-    results
+    ToolExecution {
+        results,
+        plan_ready,
+    }
 }
 
-fn execute_tool_call(name: &str, input: &Value) -> Result<String> {
+fn execute_tool_call(name: &str, input: &Value, mode: PermissionMode) -> Result<String> {
     match name {
-        "list_files" => execute_list_files(input),
-        "read_file" => execute_read_file(input),
-        "write_file" => execute_write_file(input),
-        "shell" => execute_shell(input),
+        "list_files" => {
+            let _decision = permission_decision(mode, ToolKind::ReadOnly);
+            execute_list_files(input)
+        }
+        "read_file" => {
+            let _decision = permission_decision(mode, ToolKind::ReadOnly);
+            execute_read_file(input)
+        }
+        "write_file" => execute_write_file(input, mode),
+        "shell" => execute_shell(input, mode),
         _ => Err(Error::UnknownTool(name.to_string())),
     }
 }
@@ -183,11 +253,23 @@ fn execute_read_file(input: &Value) -> Result<String> {
     Ok(std::fs::read_to_string(path)?)
 }
 
-fn execute_write_file(input: &Value) -> Result<String> {
-    execute_write_file_with_approval(input, approve_write_interactively)
+fn execute_write_file(input: &Value, mode: PermissionMode) -> Result<String> {
+    execute_write_file_with_policy(input, mode, approve_write_interactively)
 }
 
-fn execute_write_file_with_approval<F>(input: &Value, mut approve: F) -> Result<String>
+#[cfg(test)]
+fn execute_write_file_with_approval<F>(input: &Value, approve: F) -> Result<String>
+where
+    F: FnMut(&str, &str) -> Result<bool>,
+{
+    execute_write_file_with_policy(input, PermissionMode::Default, approve)
+}
+
+fn execute_write_file_with_policy<F>(
+    input: &Value,
+    mode: PermissionMode,
+    mut approve: F,
+) -> Result<String>
 where
     F: FnMut(&str, &str) -> Result<bool>,
 {
@@ -210,11 +292,22 @@ where
             ),
         })?;
 
-    if !approve(path, content)? {
-        return Err(Error::ToolDenied {
-            tool: "write_file".to_string(),
-            message: format!("user denied write to {}", path),
-        });
+    match permission_decision(mode, ToolKind::WriteFile) {
+        PermissionDecision::Allow => {}
+        PermissionDecision::AskUser => {
+            if !approve(path, content)? {
+                return Err(Error::ToolDenied {
+                    tool: "write_file".to_string(),
+                    message: format!("user denied write to {}", path),
+                });
+            }
+        }
+        PermissionDecision::Deny(reason) => {
+            return Err(Error::ToolDenied {
+                tool: "write_file".to_string(),
+                message: reason.to_string(),
+            });
+        }
     }
 
     std::fs::write(path, content)?;
@@ -237,11 +330,23 @@ fn approve_write_interactively(path: &str, content: &str) -> Result<bool> {
     Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES"))
 }
 
-fn execute_shell(input: &Value) -> Result<String> {
-    execute_shell_with_approval(input, approve_shell_interactively)
+fn execute_shell(input: &Value, mode: PermissionMode) -> Result<String> {
+    execute_shell_with_policy(input, mode, approve_shell_interactively)
 }
 
-fn execute_shell_with_approval<F>(input: &Value, mut approve: F) -> Result<String>
+#[cfg(test)]
+fn execute_shell_with_approval<F>(input: &Value, approve: F) -> Result<String>
+where
+    F: FnMut(&str) -> Result<bool>,
+{
+    execute_shell_with_policy(input, PermissionMode::Default, approve)
+}
+
+fn execute_shell_with_policy<F>(
+    input: &Value,
+    mode: PermissionMode,
+    mut approve: F,
+) -> Result<String>
 where
     F: FnMut(&str) -> Result<bool>,
 {
@@ -253,16 +358,74 @@ where
             message: "expected input.command to be a string".to_string(),
         })?;
 
-    if !approve(command)? {
+    if let Some(reason) = catastrophic_shell_denial(command) {
         return Err(Error::ToolDenied {
             tool: "shell".to_string(),
-            message: format!("user denied shell command: {}", command),
+            message: reason.to_string(),
         });
+    }
+
+    match permission_decision(mode, ToolKind::Shell) {
+        PermissionDecision::Allow => {}
+        PermissionDecision::AskUser => {
+            if !approve(command)? {
+                return Err(Error::ToolDenied {
+                    tool: "shell".to_string(),
+                    message: format!("user denied shell command: {}", command),
+                });
+            }
+        }
+        PermissionDecision::Deny(reason) => {
+            return Err(Error::ToolDenied {
+                tool: "shell".to_string(),
+                message: reason.to_string(),
+            });
+        }
     }
 
     let output = Command::new("sh").arg("-c").arg(command).output()?;
 
     Ok(format_shell_output(&output))
+}
+
+fn plan_from_exit_plan_mode(input: &Value) -> Result<String> {
+    let _decision = permission_decision(PermissionMode::Plan, ToolKind::ExitPlanMode);
+
+    input
+        .get("plan")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| Error::ToolInput {
+            tool: "exit_plan_mode".to_string(),
+            message: "expected input.plan to be a string".to_string(),
+        })
+}
+
+fn catastrophic_shell_denial(command: &str) -> Option<&'static str> {
+    let normalized = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    let dangerous = [
+        "rm -rf /",
+        "rm -fr /",
+        "rm -Rf /",
+        "rm -fR /",
+        "rm -rf /*",
+        "rm -fr /*",
+        "rm -rf ~",
+        "rm -fr ~",
+        "rm -rf $HOME",
+        "rm -fr $HOME",
+        "chmod -R 777 /",
+        "chown -R",
+        "mkfs",
+        "dd if=",
+        "shutdown",
+        "reboot",
+    ];
+
+    dangerous
+        .iter()
+        .any(|pattern| normalized.starts_with(pattern))
+        .then_some("refusing catastrophic shell command")
 }
 
 fn approve_shell_interactively(command: &str) -> Result<bool> {
@@ -331,10 +494,10 @@ mod tests {
             },
         ];
 
-        let results = execute_tool_uses(&blocks);
+        let execution = execute_tool_uses(&blocks, PermissionMode::Default);
 
         assert_eq!(
-            results,
+            execution.results,
             vec![
                 ToolResult {
                     tool_use_id: "toolu_first".to_string(),
@@ -348,6 +511,7 @@ mod tests {
                 }
             ]
         );
+        assert_eq!(execution.plan_ready, None);
 
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -360,16 +524,56 @@ mod tests {
             input: json!({}),
         }];
 
-        let results = execute_tool_uses(&blocks);
+        let execution = execute_tool_uses(&blocks, PermissionMode::Default);
 
         assert_eq!(
-            results,
+            execution.results,
             vec![ToolResult {
                 tool_use_id: "toolu_missing_path".to_string(),
                 content: "invalid input for tool read_file: expected input.path to be a string"
                     .to_string(),
                 is_error: true,
             }]
+        );
+    }
+
+    #[test]
+    fn plan_mode_advertises_exit_plan_mode() {
+        let tool_names = definitions(PermissionMode::Plan)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+
+        assert!(tool_names.contains(&"exit_plan_mode".to_string()));
+    }
+
+    #[test]
+    fn default_mode_does_not_advertise_exit_plan_mode() {
+        let tool_names = definitions(PermissionMode::Default)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+
+        assert!(!tool_names.contains(&"exit_plan_mode".to_string()));
+    }
+
+    #[test]
+    fn exit_plan_mode_returns_plan_ready_instead_of_tool_result() {
+        let blocks = vec![MessageContent::ToolUse {
+            id: "toolu_plan".to_string(),
+            name: "exit_plan_mode".to_string(),
+            input: json!({ "plan": "1. Inspect\n2. Edit\n3. Test" }),
+        }];
+
+        let execution = execute_tool_uses(&blocks, PermissionMode::Plan);
+
+        assert_eq!(execution.results, Vec::new());
+        assert_eq!(
+            execution.plan_ready,
+            Some(PlanReady {
+                tool_use_id: Some("toolu_plan".to_string()),
+                plan: "1. Inspect\n2. Edit\n3. Test".to_string(),
+            })
         );
     }
 
@@ -388,7 +592,7 @@ mod tests {
         std::fs::write(&path, "tokio = \"1\"\nserde = \"1\"\n").unwrap();
 
         let input = json!({ "path": path.to_string_lossy() });
-        let result = execute_tool_call("read_file", &input).unwrap();
+        let result = execute_tool_call("read_file", &input, PermissionMode::Default).unwrap();
 
         assert_eq!(result, "tokio = \"1\"\nserde = \"1\"\n");
 
@@ -397,7 +601,8 @@ mod tests {
 
     #[test]
     fn read_file_requires_a_string_path() {
-        let error = execute_tool_call("read_file", &json!({})).unwrap_err();
+        let error =
+            execute_tool_call("read_file", &json!({}), PermissionMode::Default).unwrap_err();
 
         match error {
             Error::ToolInput { tool, message } => {
@@ -425,7 +630,7 @@ mod tests {
         std::fs::write(path.join("Cargo.toml"), "[package]\nname = \"cawir\"\n").unwrap();
 
         let input = json!({ "path": path.to_string_lossy() });
-        let result = execute_tool_call("list_files", &input).unwrap();
+        let result = execute_tool_call("list_files", &input, PermissionMode::Default).unwrap();
 
         assert_eq!(result, "Cargo.toml\nsrc/");
 
@@ -434,7 +639,8 @@ mod tests {
 
     #[test]
     fn list_files_requires_a_string_path() {
-        let error = execute_tool_call("list_files", &json!({})).unwrap_err();
+        let error =
+            execute_tool_call("list_files", &json!({}), PermissionMode::Default).unwrap_err();
 
         match error {
             Error::ToolInput { tool, message } => {
@@ -494,8 +700,37 @@ mod tests {
     }
 
     #[test]
+    fn plan_mode_denies_write_file_without_asking() {
+        let input = json!({
+            "path": "scratch.txt",
+            "content": "hello from cawir\n"
+        });
+        let mut asked = false;
+
+        let error = execute_write_file_with_policy(&input, PermissionMode::Plan, |_, _| {
+            asked = true;
+            Ok(true)
+        })
+        .unwrap_err();
+
+        assert!(!asked);
+        match error {
+            Error::ToolDenied { tool, message } => {
+                assert_eq!(tool, "write_file");
+                assert_eq!(message, "plan mode does not allow mutating tools");
+            }
+            other => panic!("expected tool denied error, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn write_file_requires_string_content() {
-        let error = execute_tool_call("write_file", &json!({ "path": "scratch.txt" })).unwrap_err();
+        let error = execute_tool_call(
+            "write_file",
+            &json!({ "path": "scratch.txt" }),
+            PermissionMode::Default,
+        )
+        .unwrap_err();
 
         match error {
             Error::ToolInput { tool, message } => {
@@ -540,8 +775,26 @@ mod tests {
     }
 
     #[test]
+    fn bypass_still_denies_catastrophic_shell_commands() {
+        let input = json!({
+            "command": "rm   -rf   /"
+        });
+
+        let error =
+            execute_shell_with_policy(&input, PermissionMode::Bypass, |_| Ok(true)).unwrap_err();
+
+        match error {
+            Error::ToolDenied { tool, message } => {
+                assert_eq!(tool, "shell");
+                assert_eq!(message, "refusing catastrophic shell command");
+            }
+            other => panic!("expected tool denied error, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn shell_requires_string_command() {
-        let error = execute_tool_call("shell", &json!({})).unwrap_err();
+        let error = execute_tool_call("shell", &json!({}), PermissionMode::Default).unwrap_err();
 
         match error {
             Error::ToolInput { tool, message } => {
