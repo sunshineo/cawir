@@ -17,13 +17,13 @@ Some sub-steps use simpler-than-final patterns so the Rust concept of the moment
 - **`ContentBlock` as a struct, not a tagged enum** (2c–2e). Only handles text blocks; will fail to deserialize tool_use blocks. Grows into a `#[serde(tag = "type")]` enum at **3b (Parse tool-use responses)**.
 - **Tool input schemas as raw `serde_json::Value`** (starting at 3a). First tool schemas are written as JSON literals with `json!` because that mirrors Anthropic's docs and keeps CP3 focused on the agent loop, not on designing a Rust model of JSON Schema. Flexible, but light on compile-time checking. If several tools make schema repetition or schema typos a real problem, extract small typed schema helpers from that concrete pressure rather than inventing a mini schema type system upfront.
 
-## Three phases, fourteen checkpoints
+## Three phases, fourteen checkpoints plus one hardening checkpoint
 
 | Phase | Checkpoints |
 |---|---|
 | Foundation — not yet an agent | 1. Echo · 2. Chat |
 | The agent | 3. Agent loop ⭐ · 3.5. Refactor shape |
-| Craft and extension seams | 4. Providers/auth · 5. Modes · 6. Registries · 7. Resume · 8. Events · 9. Hooks/settings · 10. Streaming · 11. MCP · 12. Plugins · 13. Skills · 14. Surfaces |
+| Craft and extension seams | 4. Providers/auth · 5. Modes · 6. Registries · 7. Resume · 8. Events · 8.5. Foundation hardening · 9. Hooks/settings · 10. Streaming · 11. MCP · 12. Plugins · 13. Skills · 14. Surfaces |
 
 ---
 
@@ -94,9 +94,9 @@ The soul of cawir. cawir stops being "chat with Claude" and becomes a real codin
 - `PermissionMode` enum + `/mode` → CP5
 - Plan mode + `ExitPlanMode` → CP5
 - Multi-source tool registration → CP11-13
-- Tool-output budgeting → early cleanup around CP5-6. Add file-size caps or ranged reads so one `read_file` cannot inject a huge file into history by default. Add stdout/stderr byte or line caps for `shell`, with clear truncation markers; Checkpoint 3i currently decodes process output into one lossy UTF-8 string for simplicity.
-- Rate-limit recovery → CP4 provider cleanup. Parse 429 `retry-after` / rate-limit headers and decide whether to wait, retry, or return a clearer recoverable error.
-- Cache observability → CP4 provider cleanup. Parse provider usage fields such as Anthropic `input_tokens`, `cache_creation_input_tokens`, and `cache_read_input_tokens` so cache behavior is visible while learning.
+- Tool-output budgeting → CP8.5 foundation hardening. Add file-size caps or ranged reads so one `read_file` cannot inject a huge file into history by default. Add stdout/stderr byte or line caps for `shell`, with clear truncation markers; Checkpoint 3i currently decodes process output into one lossy UTF-8 string for simplicity.
+- Rate-limit recovery → CP8.5 foundation hardening. Parse 429 `retry-after` / rate-limit headers and decide whether to wait, retry, or return a clearer recoverable error.
+- Cache observability → CP8.5 foundation hardening. Parse provider usage fields such as Anthropic `input_tokens`, `cache_creation_input_tokens`, and `cache_read_input_tokens` so cache behavior is visible while learning.
 
 Write dispatch so each arm is already the future trait method's signature.
 
@@ -166,6 +166,7 @@ The rest of the roadmap is ordered by dependency, not by feature excitement:
 6 Registries
 7 Resume
 8 Agent events
+8.5 Foundation hardening
 9 Hooks/settings
 10 Streaming
 11 MCP
@@ -181,6 +182,7 @@ Reasoning:
 - Registries come before MCP/plugins/skills because those are capability sources; they need somewhere to register tools, commands, and context.
 - Resume comes before events/hooks/streaming because it forces a clean split between durable `Session` data and non-serializable runtime handles.
 - Events come before hooks, streaming, and alternate surfaces because all three need the same lifecycle vocabulary.
+- Foundation hardening comes before hooks/settings and external capability sources because tools, events, prompt assembly, provider behavior, and runtime ownership should be solid before third-party code can extend them.
 
 ---
 
@@ -274,6 +276,27 @@ Sub-steps:
 Done when: `repl.rs` renders agent progress from typed events instead of ad hoc `println!` calls inside the core loop.
 
 Components: Core engine, Surface.
+
+---
+
+## 8.5 — Foundation Hardening
+
+Before adding hooks, MCP, plugins, skills, or alternate surfaces, tighten the foundation that external capabilities will depend on. This is not a feature-expansion checkpoint. It is a cleanup checkpoint for the places where checkpoints 1-8 deliberately stayed simple, plus the places where implementation grew beyond the roadmap and needs to be made explicit.
+
+Sub-steps:
+
+- **8.5a — Workspace path policy**. Enforce the "current project" boundary that tool descriptions already imply. Normalize and validate paths for `read_file`, `list_files`, and `write_file`; decide how explicit user requests for outside-project paths are represented; return denied path attempts as tool errors rather than panics. *Rust:* `Path`, `PathBuf`, `canonicalize`, prefix checks, path traversal tests.
+- **8.5b — Tool output budgets and process limits**. Add bounded output for `read_file`, `list_files`, and `shell`: file-size caps or ranged reads, directory-entry caps, stdout/stderr byte caps, clear truncation markers, and a shell timeout. Keep truncation visible to the model so it can ask for narrower reads. *Rust:* byte vs char boundaries, lossy UTF-8, `Command` timeout patterns, helper structs for budgeted output.
+- **8.5c — Patch-style editing tool**. Add a safer editing primitive beside `write_file`, such as `edit_file` or `apply_patch`, so routine code changes do not require replacing entire files. Keep `write_file` for new files and complete rewrites. *Rust:* string searching vs structured patch data, error variants for ambiguous matches, tests around exact replacements.
+- **8.5d — Prompt assembly and project memory**. Introduce a concrete prompt assembly layer that builds provider-neutral instructions from named sections: identity, behavior, environment, project guidance, and later active skills. Load `AGENTS.md` / `CLAUDE.md` from the project hierarchy before the model call, without inlining tool schemas into prompt text. *Rust:* owned prompt data, filesystem lookup order, separating durable session messages from per-request prompt context.
+- **8.5e — Runtime-owned registries**. Move tool registry ownership into `Runtime` instead of rebuilding built-ins inside `tools.rs`, and make the agent loop receive registry references explicitly. Keep built-ins concrete, but make the ownership shape ready for CP9 hooks, CP11 MCP, and CP12 plugins. *Rust:* borrowing runtime state across async calls, trait object lifetimes, `&ToolRegistry` vs `Arc<ToolRegistry>`.
+- **8.5f — Provider robustness and observability**. Add provider-facing recovery and diagnostics that the current `Provider` boundary needs before more features depend on it: parse 429 `retry-after` where providers expose it, return clearer recoverable rate-limit errors, expose token usage where available, and surface Anthropic cache creation/read counts. *Rust:* optional response fields, typed provider metadata, preserving provider-neutral errors.
+- **8.5g — Event boundary hardening**. Expand events enough for hooks and alternate surfaces: session start/end, pre-tool and post-tool events, model request finish, and structured stop/failure metadata. Decide whether the current callback stays for now or becomes a lightweight stream-like adapter. Keep `tool_result` blocks as session data, not display events. *Rust:* serializable event enums, producer/consumer boundaries, callback vs stream tradeoffs.
+- **8.5h — Anthropic prompt-cache request audit**. Verify the current Anthropic `cache_control` request shape against Anthropic's documented block-level prompt caching format. If the current top-level field is wrong or provider-specific, move cache markers into the correct request blocks or remove them until prompt assembly can place them deliberately. *Rust:* provider-specific serde structs, `skip_serializing_if`, tests that assert the exact wire JSON.
+
+Done when: tools enforce project boundaries, large outputs and long processes are bounded, routine edits can happen without whole-file rewrites, prompt assembly has a real module, runtime owns registries, provider errors/usage are more observable, events are ready for hooks, and Anthropic cache behavior is either correct or deliberately absent.
+
+Components: Core engine, Capabilities, Policy, External, Surface.
 
 ---
 
@@ -389,6 +412,7 @@ Components: Surface.
 | 6 | Registries | trait objects, object safety, `Box`/`Arc` |
 | 7 | Resume | serde disk I/O, `clap`, `directories`, runtime vs durable data |
 | 8 | Agent events | event enums, producer/consumer boundaries |
+| 8.5 | Foundation hardening | path normalization, output budgeting, runtime ownership, wire-format audits |
 | 9 | Hooks/settings | settings merge, process IO, sync decision points |
 | 10 | Streaming | `futures::Stream`, SSE parsing, partial JSON |
 | 11 | MCP | external protocol clients, process lifecycle |
