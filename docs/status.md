@@ -9,10 +9,10 @@ This document tracks the current implementation state and recent progress.
 
 ## Snapshot (as of 2026-05-07)
 
-- Current focus: **Checkpoint 9 — Hooks and Settings**.
-- Next checkpoint: **9 — Hooks and Settings**.
-- Latest completed sub-step: **8 — Agent Events**.
-- Planned next order: **Checkpoint 9 — Hooks and Settings**.
+- Current focus: **Checkpoint 8.5 — Foundation Hardening**.
+- Next checkpoint: **8.5b — Tool output budgets and process limits**.
+- Latest completed sub-step: **8.5a — Workspace path policy**.
+- Planned next order: **8.5b — Tool output budgets and process limits**, then continue through the remaining 8.5 hardening sub-steps before Checkpoint 9.
 - Current user-visible behavior: one user prompt can trigger repeated `read_file`, `list_files`, approval-gated or mode-gated `write_file`, approval-gated or mode-gated `shell`, and plan-mode `exit_plan_mode` calls. cawir executes each tool request through a built-in `ToolRegistry`, sends matching `tool_result` blocks back to the active provider, and continues until the provider returns a text answer, the 42-round tool-loop cap is reached, or plan mode asks the REPL for plan approval. Agent progress is emitted as typed `AgentEvent` values from the core loop and rendered by the REPL, while `tool_result` blocks remain session data sent back to providers. In plan mode, either an `exit_plan_mode` call or a plain text final answer is treated as a proposed plan. Tool execution failures, denied mutating actions, and denied tool-backed plans are returned as error `tool_result` blocks instead of aborting the turn. Startup honors `CAWIR_PROVIDER`, otherwise reuses the saved provider, credential option, and per-provider-plus-auth-option model choices from the OS config directory, then scans providers for usable credentials; if none are configured, startup prompts for a provider before credential setup. Startup prints the selected provider, auth option, credential source, model, session id, and active permission mode. Non-empty conversations are saved as session JSON in the OS data directory after slash-command state changes, exits, and turns; brand-new empty sessions are not written to disk. Sessions store the canonical project path; `cawir --continue` opens the most recently updated non-empty session for the current project, while `cawir --resume <id>` opens a specific session by id. Resumed sessions print the previous conversation, with tool calls and tool results summarized. Slash commands are dispatched through a built-in `CommandRegistry`: bare `/provider` lists provider options; `/provider anthropic|openai|ollama` switches providers inside the REPL after resolving or acquiring a supported credential option from the credentials file, environment, `.env`, API-key prompt, Codex OAuth device-code login, or local no-auth setup, and warns that existing history will be sent to the new provider. Bare `/resume` lists non-empty saved sessions for the current project newest-first, excluding the currently active session; `/resume <id>` switches the running REPL to a saved session and prints its transcript. `/model` shows the current model, the active provider/auth default, and dynamically queried available models where the provider exposes a model-list endpoint; `/model <name>` switches the model for the current provider/auth route and remembers it. `/mode` shows the current permission mode; `/mode default|plan|accept-edits|bypass` switches the current permission mode for the running REPL. OpenAI API-key auth still uses the OpenAI chat-completions endpoint; OpenAI Codex OAuth uses the ChatGPT Codex backend with a Responses-style streaming request that is collected internally before printing. Ollama uses the local `http://localhost:11434/api/chat` endpoint with native Ollama tool calls and defaults to `qwen3:8b`.
 
 ## Completed checkpoints
@@ -78,8 +78,12 @@ This document tracks the current implementation state and recent progress.
 
 - `8a` through `8c` completed on 2026-05-07. Added `AgentEvent` and `StopReason` as the typed event vocabulary between the core agent loop and surfaces. `agent.rs` now emits user prompt, model request, assistant text, tool request, tool finish, stop, and failure events. `repl.rs` renders those events to preserve the current terminal progress output, while `tool_result` blocks remain separate session data for provider follow-up messages.
 
+### 8.5 — Foundation Hardening
+
+- `8.5a` completed on 2026-05-07. Refactored built-in tool execution into a prepare → central policy/approval → execute flow. File tools now normalize paths against the canonical current project root and deny `read_file`, `list_files`, and `write_file` attempts outside that root, including traversal and absolute outside-project paths. Approval prompting moved out of individual tools and into the REPL-facing tool approval callback; tools still own input parsing, path preparation, and tool-specific hard stops such as catastrophic shell-command denial.
+
 ## Learnings
 
-- `learnings-rust/` currently includes notes `01` through `35`.
-- `learnings-agent/` currently includes notes `01` through `11`.
+- `learnings-rust/` currently includes notes `01` through `36`.
+- `learnings-agent/` currently includes notes `01` through `12`.
 - New Rust discussions should be distilled into `learnings-rust/*.md`; new agent-design discussions should be distilled into `learnings-agent/*.md`.

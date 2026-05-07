@@ -1,5 +1,5 @@
 use std::{
-    io::{self, Write},
+    path::{Component, Path, PathBuf},
     process::Command,
 };
 
@@ -23,7 +23,8 @@ trait Tool {
         mode == PermissionMode::Plan || self.name() != "exit_plan_mode"
     }
 
-    fn execute(&self, input: &Value, mode: PermissionMode) -> Result<ToolOutput>;
+    fn prepare(&self, input: &Value, context: &ToolContext) -> Result<PreparedToolCall>;
+    fn execute(&self, input: PreparedToolInput) -> Result<ToolOutput>;
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
@@ -59,21 +60,108 @@ impl ToolRegistry {
             .collect()
     }
 
-    fn execute(&self, name: &str, input: &Value, mode: PermissionMode) -> Result<ToolOutput> {
+    fn execute<F>(
+        &self,
+        name: &str,
+        input: &Value,
+        mode: PermissionMode,
+        approve: &mut F,
+    ) -> Result<ToolOutput>
+    where
+        F: FnMut(&ToolApprovalRequest) -> Result<bool>,
+    {
         let tool = self
             .tools
             .iter()
             .find(|tool| tool.name() == name)
             .ok_or_else(|| Error::UnknownTool(name.to_string()))?;
 
-        let _decision = permission_decision(mode, tool.kind());
-        tool.execute(input, mode)
+        let context = ToolContext::current_project()?;
+        let prepared = tool.prepare(input, &context)?;
+        apply_permission_decision(mode, &prepared, approve)?;
+        tool.execute(prepared.input)
     }
 }
 
 enum ToolOutput {
     Result(String),
     PlanReady(String),
+}
+
+struct ToolContext {
+    project_root: PathBuf,
+}
+
+impl ToolContext {
+    fn current_project() -> Result<Self> {
+        Ok(Self {
+            project_root: std::env::current_dir()?.canonicalize()?,
+        })
+    }
+}
+
+struct PreparedToolCall {
+    tool_name: &'static str,
+    kind: ToolKind,
+    approval: Option<ToolApprovalRequest>,
+    input: PreparedToolInput,
+}
+
+enum PreparedToolInput {
+    ReadFile { path: PathBuf },
+    ListFiles { path: PathBuf },
+    WriteFile { path: PathBuf, content: String },
+    Shell { command: String },
+    ExitPlanMode { plan: String },
+}
+
+pub(crate) struct ToolApprovalRequest {
+    tool_name: &'static str,
+    summary: String,
+    denial_message: String,
+}
+
+impl ToolApprovalRequest {
+    pub(crate) fn tool_name(&self) -> &'static str {
+        self.tool_name
+    }
+
+    pub(crate) fn summary(&self) -> &str {
+        &self.summary
+    }
+}
+
+fn apply_permission_decision<F>(
+    mode: PermissionMode,
+    prepared: &PreparedToolCall,
+    approve: &mut F,
+) -> Result<()>
+where
+    F: FnMut(&ToolApprovalRequest) -> Result<bool>,
+{
+    match permission_decision(mode, prepared.kind) {
+        PermissionDecision::Allow => Ok(()),
+        PermissionDecision::AskUser => {
+            let approval = prepared.approval.as_ref().ok_or_else(|| Error::ToolInput {
+                tool: prepared.tool_name.to_string(),
+                message: "tool requires approval but did not provide an approval request"
+                    .to_string(),
+            })?;
+
+            if approve(approval)? {
+                Ok(())
+            } else {
+                Err(Error::ToolDenied {
+                    tool: prepared.tool_name.to_string(),
+                    message: approval.denial_message.clone(),
+                })
+            }
+        }
+        PermissionDecision::Deny(reason) => Err(Error::ToolDenied {
+            tool: prepared.tool_name.to_string(),
+            message: reason.to_string(),
+        }),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,8 +209,24 @@ impl Tool for ReadFileTool {
         ToolKind::ReadOnly
     }
 
-    fn execute(&self, input: &Value, _mode: PermissionMode) -> Result<ToolOutput> {
-        execute_read_file(input).map(ToolOutput::Result)
+    fn prepare(&self, input: &Value, context: &ToolContext) -> Result<PreparedToolCall> {
+        let path = input_string(input, "read_file", "path")?;
+        let path = resolve_existing_project_path("read_file", path, context)?;
+
+        Ok(PreparedToolCall {
+            tool_name: self.name(),
+            kind: self.kind(),
+            approval: None,
+            input: PreparedToolInput::ReadFile { path },
+        })
+    }
+
+    fn execute(&self, input: PreparedToolInput) -> Result<ToolOutput> {
+        let PreparedToolInput::ReadFile { path } = input else {
+            return Err(wrong_prepared_input(self.name()));
+        };
+
+        execute_read_file(&path).map(ToolOutput::Result)
     }
 }
 
@@ -155,8 +259,24 @@ impl Tool for ListFilesTool {
         ToolKind::ReadOnly
     }
 
-    fn execute(&self, input: &Value, _mode: PermissionMode) -> Result<ToolOutput> {
-        execute_list_files(input).map(ToolOutput::Result)
+    fn prepare(&self, input: &Value, context: &ToolContext) -> Result<PreparedToolCall> {
+        let path = input_string(input, "list_files", "path")?;
+        let path = resolve_existing_project_path("list_files", path, context)?;
+
+        Ok(PreparedToolCall {
+            tool_name: self.name(),
+            kind: self.kind(),
+            approval: None,
+            input: PreparedToolInput::ListFiles { path },
+        })
+    }
+
+    fn execute(&self, input: PreparedToolInput) -> Result<ToolOutput> {
+        let PreparedToolInput::ListFiles { path } = input else {
+            return Err(wrong_prepared_input(self.name()));
+        };
+
+        execute_list_files(&path).map(ToolOutput::Result)
     }
 }
 
@@ -193,8 +313,41 @@ impl Tool for WriteFileTool {
         ToolKind::WriteFile
     }
 
-    fn execute(&self, input: &Value, mode: PermissionMode) -> Result<ToolOutput> {
-        execute_write_file(input, mode).map(ToolOutput::Result)
+    fn prepare(&self, input: &Value, context: &ToolContext) -> Result<PreparedToolCall> {
+        let raw_path = input_string(input, "write_file", "path")?;
+        let content = input
+            .get("content")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::ToolInput {
+                tool: "write_file".to_string(),
+                message: format!(
+                    "expected input.content to be a string; received input: {}",
+                    input
+                ),
+            })?;
+        let path = resolve_writable_project_path("write_file", raw_path, context)?;
+
+        Ok(PreparedToolCall {
+            tool_name: self.name(),
+            kind: self.kind(),
+            approval: Some(ToolApprovalRequest {
+                tool_name: self.name(),
+                summary: format!("write {} bytes to {}", content.len(), path.display()),
+                denial_message: format!("user denied write to {}", path.display()),
+            }),
+            input: PreparedToolInput::WriteFile {
+                path,
+                content: content.to_string(),
+            },
+        })
+    }
+
+    fn execute(&self, input: PreparedToolInput) -> Result<ToolOutput> {
+        let PreparedToolInput::WriteFile { path, content } = input else {
+            return Err(wrong_prepared_input(self.name()));
+        };
+
+        execute_write_file(&path, &content).map(ToolOutput::Result)
     }
 }
 
@@ -227,8 +380,36 @@ impl Tool for ShellTool {
         ToolKind::Shell
     }
 
-    fn execute(&self, input: &Value, mode: PermissionMode) -> Result<ToolOutput> {
-        execute_shell(input, mode).map(ToolOutput::Result)
+    fn prepare(&self, input: &Value, _context: &ToolContext) -> Result<PreparedToolCall> {
+        let command = input_string(input, "shell", "command")?;
+
+        if let Some(reason) = catastrophic_shell_denial(command) {
+            return Err(Error::ToolDenied {
+                tool: "shell".to_string(),
+                message: reason.to_string(),
+            });
+        }
+
+        Ok(PreparedToolCall {
+            tool_name: self.name(),
+            kind: self.kind(),
+            approval: Some(ToolApprovalRequest {
+                tool_name: self.name(),
+                summary: format!("run shell command: {}", command),
+                denial_message: format!("user denied shell command: {}", command),
+            }),
+            input: PreparedToolInput::Shell {
+                command: command.to_string(),
+            },
+        })
+    }
+
+    fn execute(&self, input: PreparedToolInput) -> Result<ToolOutput> {
+        let PreparedToolInput::Shell { command } = input else {
+            return Err(wrong_prepared_input(self.name()));
+        };
+
+        execute_shell(&command).map(ToolOutput::Result)
     }
 }
 
@@ -261,18 +442,49 @@ impl Tool for ExitPlanModeTool {
         ToolKind::ExitPlanMode
     }
 
-    fn execute(&self, input: &Value, _mode: PermissionMode) -> Result<ToolOutput> {
-        plan_from_exit_plan_mode(input).map(ToolOutput::PlanReady)
+    fn prepare(&self, input: &Value, _context: &ToolContext) -> Result<PreparedToolCall> {
+        let plan = input_string(input, "exit_plan_mode", "plan")?;
+
+        Ok(PreparedToolCall {
+            tool_name: self.name(),
+            kind: self.kind(),
+            approval: None,
+            input: PreparedToolInput::ExitPlanMode {
+                plan: plan.to_string(),
+            },
+        })
+    }
+
+    fn execute(&self, input: PreparedToolInput) -> Result<ToolOutput> {
+        let PreparedToolInput::ExitPlanMode { plan } = input else {
+            return Err(wrong_prepared_input(self.name()));
+        };
+
+        Ok(ToolOutput::PlanReady(plan))
     }
 }
 
+#[cfg(test)]
 pub(crate) fn execute_tool_uses<F>(
     blocks: &[MessageContent],
     mode: PermissionMode,
-    mut emit: F,
+    emit: F,
 ) -> ToolExecution
 where
     F: FnMut(AgentEvent),
+{
+    execute_tool_uses_with_approval(blocks, mode, emit, |_| Ok(true))
+}
+
+pub(crate) fn execute_tool_uses_with_approval<F, A>(
+    blocks: &[MessageContent],
+    mode: PermissionMode,
+    mut emit: F,
+    mut approve: A,
+) -> ToolExecution
+where
+    F: FnMut(AgentEvent),
+    A: FnMut(&ToolApprovalRequest) -> Result<bool>,
 {
     let registry = ToolRegistry::builtins();
     let mut results = Vec::new();
@@ -287,7 +499,7 @@ where
                     name: name.clone(),
                     input: input.clone(),
                 });
-                match registry.execute(name, input, mode) {
+                match registry.execute(name, input, mode, &mut approve) {
                     Ok(ToolOutput::Result(content)) => {
                         emit(AgentEvent::ToolUseFinished {
                             id: id.clone(),
@@ -344,7 +556,20 @@ where
 
 #[cfg(test)]
 fn execute_tool_call(name: &str, input: &Value, mode: PermissionMode) -> Result<String> {
-    match ToolRegistry::builtins().execute(name, input, mode)? {
+    execute_tool_call_with_approval(name, input, mode, |_| Ok(true))
+}
+
+#[cfg(test)]
+fn execute_tool_call_with_approval<F>(
+    name: &str,
+    input: &Value,
+    mode: PermissionMode,
+    mut approve: F,
+) -> Result<String>
+where
+    F: FnMut(&ToolApprovalRequest) -> Result<bool>,
+{
+    match ToolRegistry::builtins().execute(name, input, mode, &mut approve)? {
         ToolOutput::Result(content) => Ok(content),
         ToolOutput::PlanReady(_) => Err(Error::ToolInput {
             tool: name.to_string(),
@@ -353,15 +578,116 @@ fn execute_tool_call(name: &str, input: &Value, mode: PermissionMode) -> Result<
     }
 }
 
-fn execute_list_files(input: &Value) -> Result<String> {
-    let path = input
-        .get("path")
+fn input_string<'a>(input: &'a Value, tool: &str, field: &str) -> Result<&'a str> {
+    input
+        .get(field)
         .and_then(Value::as_str)
         .ok_or_else(|| Error::ToolInput {
-            tool: "list_files".to_string(),
-            message: "expected input.path to be a string".to_string(),
-        })?;
+            tool: tool.to_string(),
+            message: format!("expected input.{field} to be a string"),
+        })
+}
 
+fn wrong_prepared_input(tool: &str) -> Error {
+    Error::ToolInput {
+        tool: tool.to_string(),
+        message: "tool received prepared input for a different tool".to_string(),
+    }
+}
+
+fn resolve_existing_project_path(
+    tool: &str,
+    input_path: &str,
+    context: &ToolContext,
+) -> Result<PathBuf> {
+    let lexical_path = lexical_project_path(tool, input_path, context)?;
+    let canonical_path = lexical_path.canonicalize()?;
+
+    if !canonical_path.starts_with(&context.project_root) {
+        return Err(outside_project_error(tool, input_path, context));
+    }
+
+    Ok(canonical_path)
+}
+
+fn resolve_writable_project_path(
+    tool: &str,
+    input_path: &str,
+    context: &ToolContext,
+) -> Result<PathBuf> {
+    let lexical_path = lexical_project_path(tool, input_path, context)?;
+
+    if lexical_path.exists() {
+        let canonical_path = lexical_path.canonicalize()?;
+        if !canonical_path.starts_with(&context.project_root) {
+            return Err(outside_project_error(tool, input_path, context));
+        }
+        return Ok(canonical_path);
+    }
+
+    let parent = lexical_path.parent().ok_or_else(|| Error::ToolInput {
+        tool: tool.to_string(),
+        message: format!("path has no parent directory: {input_path}"),
+    })?;
+    let file_name = lexical_path.file_name().ok_or_else(|| Error::ToolInput {
+        tool: tool.to_string(),
+        message: format!("path must name a file: {input_path}"),
+    })?;
+    let canonical_parent = parent.canonicalize()?;
+
+    if !canonical_parent.starts_with(&context.project_root) {
+        return Err(outside_project_error(tool, input_path, context));
+    }
+
+    Ok(canonical_parent.join(file_name))
+}
+
+fn lexical_project_path(tool: &str, input_path: &str, context: &ToolContext) -> Result<PathBuf> {
+    let raw_path = Path::new(input_path);
+    let joined = if raw_path.is_absolute() {
+        raw_path.to_path_buf()
+    } else {
+        context.project_root.join(raw_path)
+    };
+    let normalized = normalize_path_lexically(&joined);
+
+    if !normalized.starts_with(&context.project_root) {
+        return Err(outside_project_error(tool, input_path, context));
+    }
+
+    Ok(normalized)
+}
+
+fn normalize_path_lexically(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+
+    normalized
+}
+
+fn outside_project_error(tool: &str, input_path: &str, context: &ToolContext) -> Error {
+    Error::ToolDenied {
+        tool: tool.to_string(),
+        message: format!(
+            "path {} is outside the current project {}",
+            input_path,
+            context.project_root.display()
+        ),
+    }
+}
+
+fn execute_list_files(path: &Path) -> Result<String> {
     let mut entries = std::fs::read_dir(path)?
         .map(|entry| -> Result<String> {
             let entry = entry?;
@@ -380,164 +706,24 @@ fn execute_list_files(input: &Value) -> Result<String> {
     Ok(entries.join("\n"))
 }
 
-fn execute_read_file(input: &Value) -> Result<String> {
-    let path = input
-        .get("path")
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::ToolInput {
-            tool: "read_file".to_string(),
-            message: "expected input.path to be a string".to_string(),
-        })?;
-
+fn execute_read_file(path: &Path) -> Result<String> {
     Ok(std::fs::read_to_string(path)?)
 }
 
-fn execute_write_file(input: &Value, mode: PermissionMode) -> Result<String> {
-    execute_write_file_with_policy(input, mode, approve_write_interactively)
-}
-
-#[cfg(test)]
-fn execute_write_file_with_approval<F>(input: &Value, approve: F) -> Result<String>
-where
-    F: FnMut(&str, &str) -> Result<bool>,
-{
-    execute_write_file_with_policy(input, PermissionMode::Default, approve)
-}
-
-fn execute_write_file_with_policy<F>(
-    input: &Value,
-    mode: PermissionMode,
-    mut approve: F,
-) -> Result<String>
-where
-    F: FnMut(&str, &str) -> Result<bool>,
-{
-    let path = input
-        .get("path")
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::ToolInput {
-            tool: "write_file".to_string(),
-            message: "expected input.path to be a string".to_string(),
-        })?;
-
-    let content = input
-        .get("content")
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::ToolInput {
-            tool: "write_file".to_string(),
-            message: format!(
-                "expected input.content to be a string; received input: {}",
-                input
-            ),
-        })?;
-
-    match permission_decision(mode, ToolKind::WriteFile) {
-        PermissionDecision::Allow => {}
-        PermissionDecision::AskUser => {
-            if !approve(path, content)? {
-                return Err(Error::ToolDenied {
-                    tool: "write_file".to_string(),
-                    message: format!("user denied write to {}", path),
-                });
-            }
-        }
-        PermissionDecision::Deny(reason) => {
-            return Err(Error::ToolDenied {
-                tool: "write_file".to_string(),
-                message: reason.to_string(),
-            });
-        }
-    }
-
+fn execute_write_file(path: &Path, content: &str) -> Result<String> {
     std::fs::write(path, content)?;
 
-    Ok(format!("wrote {} bytes to {}", content.len(), path))
-}
-
-fn approve_write_interactively(path: &str, content: &str) -> Result<bool> {
-    println!(
-        "write_file wants to write {} bytes to {}",
+    Ok(format!(
+        "wrote {} bytes to {}",
         content.len(),
-        path
-    );
-    print!("approve write? [y/N] ");
-    io::stdout().flush()?;
-
-    let mut answer = String::new();
-    io::stdin().read_line(&mut answer)?;
-
-    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES"))
+        path.display()
+    ))
 }
 
-fn execute_shell(input: &Value, mode: PermissionMode) -> Result<String> {
-    execute_shell_with_policy(input, mode, approve_shell_interactively)
-}
-
-#[cfg(test)]
-fn execute_shell_with_approval<F>(input: &Value, approve: F) -> Result<String>
-where
-    F: FnMut(&str) -> Result<bool>,
-{
-    execute_shell_with_policy(input, PermissionMode::Default, approve)
-}
-
-fn execute_shell_with_policy<F>(
-    input: &Value,
-    mode: PermissionMode,
-    mut approve: F,
-) -> Result<String>
-where
-    F: FnMut(&str) -> Result<bool>,
-{
-    let command = input
-        .get("command")
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::ToolInput {
-            tool: "shell".to_string(),
-            message: "expected input.command to be a string".to_string(),
-        })?;
-
-    if let Some(reason) = catastrophic_shell_denial(command) {
-        return Err(Error::ToolDenied {
-            tool: "shell".to_string(),
-            message: reason.to_string(),
-        });
-    }
-
-    match permission_decision(mode, ToolKind::Shell) {
-        PermissionDecision::Allow => {}
-        PermissionDecision::AskUser => {
-            if !approve(command)? {
-                return Err(Error::ToolDenied {
-                    tool: "shell".to_string(),
-                    message: format!("user denied shell command: {}", command),
-                });
-            }
-        }
-        PermissionDecision::Deny(reason) => {
-            return Err(Error::ToolDenied {
-                tool: "shell".to_string(),
-                message: reason.to_string(),
-            });
-        }
-    }
-
+fn execute_shell(command: &str) -> Result<String> {
     let output = Command::new("sh").arg("-c").arg(command).output()?;
 
     Ok(format_shell_output(&output))
-}
-
-fn plan_from_exit_plan_mode(input: &Value) -> Result<String> {
-    let _decision = permission_decision(PermissionMode::Plan, ToolKind::ExitPlanMode);
-
-    input
-        .get("plan")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| Error::ToolInput {
-            tool: "exit_plan_mode".to_string(),
-            message: "expected input.plan to be a string".to_string(),
-        })
 }
 
 fn catastrophic_shell_denial(command: &str) -> Option<&'static str> {
@@ -567,17 +753,6 @@ fn catastrophic_shell_denial(command: &str) -> Option<&'static str> {
         .then_some("refusing catastrophic shell command")
 }
 
-fn approve_shell_interactively(command: &str) -> Result<bool> {
-    println!("shell wants to run: {}", command);
-    print!("approve command? [y/N] ");
-    io::stdout().flush()?;
-
-    let mut answer = String::new();
-    io::stdin().read_line(&mut answer)?;
-
-    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES"))
-}
-
 fn format_shell_output(output: &std::process::Output) -> String {
     let status = match output.status.code() {
         Some(code) => format!("exit status: {}", code),
@@ -594,17 +769,22 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    #[test]
-    fn tool_execution_returns_results_for_all_tool_uses() {
+    fn project_test_path(prefix: &str) -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "cawir-multi-tool-test-{}-{}",
-            std::process::id(),
-            unique
-        ));
+        let dir = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join("cawir-tool-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(format!("{}-{}-{}", prefix, std::process::id(), unique))
+    }
+
+    #[test]
+    fn tool_execution_returns_results_for_all_tool_uses() {
+        let path = project_test_path("multi-tool");
 
         std::fs::create_dir(&path).unwrap();
         std::fs::write(path.join("first.txt"), "first result").unwrap();
@@ -670,15 +850,7 @@ mod tests {
 
     #[test]
     fn tool_execution_emits_progress_events_separate_from_results() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "cawir-tool-event-test-{}-{}.txt",
-            std::process::id(),
-            unique
-        ));
+        let path = project_test_path("tool-event.txt");
         std::fs::write(&path, "event result").unwrap();
 
         let input = json!({ "path": path.to_string_lossy() });
@@ -764,15 +936,7 @@ mod tests {
 
     #[test]
     fn executes_read_file_tool_call() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "cawir-read-file-test-{}-{}.txt",
-            std::process::id(),
-            unique
-        ));
+        let path = project_test_path("read-file.txt");
 
         std::fs::write(&path, "tokio = \"1\"\nserde = \"1\"\n").unwrap();
 
@@ -800,15 +964,7 @@ mod tests {
 
     #[test]
     fn executes_list_files_tool_call() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "cawir-list-files-test-{}-{}",
-            std::process::id(),
-            unique
-        ));
+        let path = project_test_path("list-files");
 
         std::fs::create_dir(&path).unwrap();
         std::fs::create_dir(path.join("src")).unwrap();
@@ -837,22 +993,55 @@ mod tests {
     }
 
     #[test]
+    fn read_file_denies_paths_outside_project() {
+        let error = execute_tool_call(
+            "read_file",
+            &json!({ "path": "../Cargo.toml" }),
+            PermissionMode::Default,
+        )
+        .unwrap_err();
+
+        match error {
+            Error::ToolDenied { tool, message } => {
+                assert_eq!(tool, "read_file");
+                assert!(message.contains("outside the current project"));
+            }
+            other => panic!("expected tool denied error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn list_files_denies_absolute_paths_outside_project() {
+        let outside = std::env::temp_dir();
+        let error = execute_tool_call(
+            "list_files",
+            &json!({ "path": outside.to_string_lossy() }),
+            PermissionMode::Default,
+        )
+        .unwrap_err();
+
+        match error {
+            Error::ToolDenied { tool, message } => {
+                assert_eq!(tool, "list_files");
+                assert!(message.contains("outside the current project"));
+            }
+            other => panic!("expected tool denied error, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn executes_write_file_tool_call_when_approved() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "cawir-write-file-test-{}-{}.txt",
-            std::process::id(),
-            unique
-        ));
+        let path = project_test_path("write-file.txt");
 
         let input = json!({
             "path": path.to_string_lossy(),
             "content": "hello from cawir\n"
         });
-        let result = execute_write_file_with_approval(&input, |_, _| Ok(true)).unwrap();
+        let result =
+            execute_tool_call_with_approval("write_file", &input, PermissionMode::Default, |_| {
+                Ok(true)
+            })
+            .unwrap();
 
         assert_eq!(
             result,
@@ -867,18 +1056,48 @@ mod tests {
     }
 
     #[test]
-    fn write_file_denial_returns_tool_error() {
+    fn write_file_denies_paths_outside_project_before_approval() {
         let input = json!({
-            "path": "scratch.txt",
+            "path": "../cawir-outside-write.txt",
+            "content": "hello from cawir\n"
+        });
+        let mut asked = false;
+
+        let error =
+            execute_tool_call_with_approval("write_file", &input, PermissionMode::Default, |_| {
+                asked = true;
+                Ok(true)
+            })
+            .unwrap_err();
+
+        assert!(!asked);
+        match error {
+            Error::ToolDenied { tool, message } => {
+                assert_eq!(tool, "write_file");
+                assert!(message.contains("outside the current project"));
+            }
+            other => panic!("expected tool denied error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn write_file_denial_returns_tool_error() {
+        let path = project_test_path("denied-write.txt");
+        let input = json!({
+            "path": path.to_string_lossy(),
             "content": "hello from cawir\n"
         });
 
-        let error = execute_write_file_with_approval(&input, |_, _| Ok(false)).unwrap_err();
+        let error =
+            execute_tool_call_with_approval("write_file", &input, PermissionMode::Default, |_| {
+                Ok(false)
+            })
+            .unwrap_err();
 
         match error {
             Error::ToolDenied { tool, message } => {
                 assert_eq!(tool, "write_file");
-                assert_eq!(message, "user denied write to scratch.txt");
+                assert_eq!(message, format!("user denied write to {}", path.display()));
             }
             other => panic!("expected tool denied error, got {:?}", other),
         }
@@ -886,17 +1105,19 @@ mod tests {
 
     #[test]
     fn plan_mode_denies_write_file_without_asking() {
+        let path = project_test_path("plan-denied-write.txt");
         let input = json!({
-            "path": "scratch.txt",
+            "path": path.to_string_lossy(),
             "content": "hello from cawir\n"
         });
         let mut asked = false;
 
-        let error = execute_write_file_with_policy(&input, PermissionMode::Plan, |_, _| {
-            asked = true;
-            Ok(true)
-        })
-        .unwrap_err();
+        let error =
+            execute_tool_call_with_approval("write_file", &input, PermissionMode::Plan, |_| {
+                asked = true;
+                Ok(true)
+            })
+            .unwrap_err();
 
         assert!(!asked);
         match error {
@@ -934,7 +1155,9 @@ mod tests {
             "command": "printf 'hello from stdout'; printf 'hello from stderr' >&2"
         });
 
-        let result = execute_shell_with_approval(&input, |_| Ok(true)).unwrap();
+        let result =
+            execute_tool_call_with_approval("shell", &input, PermissionMode::Default, |_| Ok(true))
+                .unwrap();
 
         assert_eq!(
             result,
@@ -948,7 +1171,11 @@ mod tests {
             "command": "cargo test"
         });
 
-        let error = execute_shell_with_approval(&input, |_| Ok(false)).unwrap_err();
+        let error =
+            execute_tool_call_with_approval("shell", &input, PermissionMode::Default, |_| {
+                Ok(false)
+            })
+            .unwrap_err();
 
         match error {
             Error::ToolDenied { tool, message } => {
@@ -966,7 +1193,8 @@ mod tests {
         });
 
         let error =
-            execute_shell_with_policy(&input, PermissionMode::Bypass, |_| Ok(true)).unwrap_err();
+            execute_tool_call_with_approval("shell", &input, PermissionMode::Bypass, |_| Ok(true))
+                .unwrap_err();
 
         match error {
             Error::ToolDenied { tool, message } => {
@@ -996,7 +1224,9 @@ mod tests {
             "command": "printf 'failure details' >&2; exit 7"
         });
 
-        let result = execute_shell_with_approval(&input, |_| Ok(true)).unwrap();
+        let result =
+            execute_tool_call_with_approval("shell", &input, PermissionMode::Default, |_| Ok(true))
+                .unwrap();
 
         assert_eq!(
             result,

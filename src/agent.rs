@@ -5,7 +5,7 @@ use crate::{
     policy::PermissionMode,
     provider::{Provider, ProviderResponse},
     session::{Message, MessageContent},
-    tools::{self, PlanReady},
+    tools::{self, PlanReady, ToolApprovalRequest},
 };
 
 const MAX_TOOL_ROUNDS: usize = 42;
@@ -14,6 +14,15 @@ const MAX_TOOL_ROUNDS: usize = 42;
 pub(crate) enum TurnOutcome {
     Complete,
     PlanReady(PlanReady),
+}
+
+pub(crate) struct TurnHooks<'a, E, A>
+where
+    E: FnMut(AgentEvent),
+    A: FnMut(&ToolApprovalRequest) -> Result<bool>,
+{
+    pub(crate) emit: &'a mut E,
+    pub(crate) approve: &'a mut A,
 }
 
 pub(crate) fn submit_user_prompt(
@@ -27,19 +36,24 @@ pub(crate) fn submit_user_prompt(
     history.push(Message::user_text(prompt));
 }
 
-pub(crate) async fn run_turn<P: Provider>(
+pub(crate) async fn run_turn<P, E, A>(
     provider: &P,
     client: &reqwest::Client,
     credential: &ActiveCredential,
     model: &str,
     mode: PermissionMode,
     history: &mut Vec<Message>,
-    emit: &mut impl FnMut(AgentEvent),
-) -> Result<TurnOutcome> {
+    hooks: &mut TurnHooks<'_, E, A>,
+) -> Result<TurnOutcome>
+where
+    P: Provider,
+    E: FnMut(AgentEvent),
+    A: FnMut(&ToolApprovalRequest) -> Result<bool>,
+{
     let mut tool_rounds = 0;
 
     loop {
-        emit(AgentEvent::ModelRequestStart {
+        (hooks.emit)(AgentEvent::ModelRequestStart {
             provider: provider.name().to_string(),
             model: model.to_string(),
         });
@@ -50,7 +64,7 @@ pub(crate) async fn run_turn<P: Provider>(
         {
             Ok(response) => response,
             Err(error) => {
-                emit(AgentEvent::StopFailure {
+                (hooks.emit)(AgentEvent::StopFailure {
                     message: error.to_string(),
                 });
                 return Err(error);
@@ -59,7 +73,7 @@ pub(crate) async fn run_turn<P: Provider>(
 
         match response {
             ProviderResponse::Text(reply) => {
-                emit(AgentEvent::AssistantText {
+                (hooks.emit)(AgentEvent::AssistantText {
                     provider: provider.name().to_string(),
                     text: reply.clone(),
                 });
@@ -67,7 +81,7 @@ pub(crate) async fn run_turn<P: Provider>(
                     text: reply.clone(),
                 }]));
                 if mode == PermissionMode::Plan {
-                    emit(AgentEvent::Stop {
+                    (hooks.emit)(AgentEvent::Stop {
                         reason: StopReason::PlanReady,
                     });
                     return Ok(TurnOutcome::PlanReady(PlanReady {
@@ -75,7 +89,7 @@ pub(crate) async fn run_turn<P: Provider>(
                         plan: reply,
                     }));
                 }
-                emit(AgentEvent::Stop {
+                (hooks.emit)(AgentEvent::Stop {
                     reason: StopReason::Complete,
                 });
                 return Ok(TurnOutcome::Complete);
@@ -84,7 +98,7 @@ pub(crate) async fn run_turn<P: Provider>(
                 tool_rounds += 1;
                 if tool_rounds > MAX_TOOL_ROUNDS {
                     let error = Error::ToolLoopLimitExceeded(MAX_TOOL_ROUNDS);
-                    emit(AgentEvent::StopFailure {
+                    (hooks.emit)(AgentEvent::StopFailure {
                         message: error.to_string(),
                     });
                     return Err(error);
@@ -92,17 +106,22 @@ pub(crate) async fn run_turn<P: Provider>(
 
                 for block in &blocks {
                     if let MessageContent::Text { text } = block {
-                        emit(AgentEvent::AssistantText {
+                        (hooks.emit)(AgentEvent::AssistantText {
                             provider: provider.name().to_string(),
                             text: text.clone(),
                         });
                     }
                 }
 
-                let tool_execution = tools::execute_tool_uses(&blocks, mode, &mut *emit);
+                let tool_execution = tools::execute_tool_uses_with_approval(
+                    &blocks,
+                    mode,
+                    &mut *hooks.emit,
+                    &mut *hooks.approve,
+                );
                 if tool_execution.results.is_empty() && tool_execution.plan_ready.is_none() {
                     let error = Error::EmptyContent(provider.name().to_string());
-                    emit(AgentEvent::StopFailure {
+                    (hooks.emit)(AgentEvent::StopFailure {
                         message: error.to_string(),
                     });
                     return Err(error);
@@ -110,7 +129,7 @@ pub(crate) async fn run_turn<P: Provider>(
 
                 history.push(Message::assistant(blocks));
                 if let Some(plan_ready) = tool_execution.plan_ready {
-                    emit(AgentEvent::Stop {
+                    (hooks.emit)(AgentEvent::Stop {
                         reason: StopReason::PlanReady,
                     });
                     return Ok(TurnOutcome::PlanReady(plan_ready));

@@ -23,6 +23,7 @@ use crate::{
         Message, MessageContent, Session, current_project_path, is_resumable,
         list_resumable_project_sessions, load_most_recent_session, load_session, save_session,
     },
+    tools::ToolApprovalRequest,
 };
 
 #[derive(Debug, Parser)]
@@ -608,7 +609,17 @@ async fn run_agent_until_complete<P: Provider>(
     emit: &mut impl FnMut(AgentEvent),
 ) -> Result<()> {
     loop {
-        match agent::run_turn(provider, client, credential, model, *mode, history, emit).await? {
+        let mut approve_tool = approve_tool_interactively;
+        let mut hooks = agent::TurnHooks {
+            emit,
+            approve: &mut approve_tool,
+        };
+
+        match agent::run_turn(
+            provider, client, credential, model, *mode, history, &mut hooks,
+        )
+        .await?
+        {
             agent::TurnOutcome::Complete => return Ok(()),
             agent::TurnOutcome::PlanReady(plan_ready) => {
                 println!();
@@ -689,6 +700,17 @@ fn render_agent_event(event: AgentEvent) {
 
 fn approve_plan_interactively() -> Result<bool> {
     print!("approve plan and switch to default mode? [y/N] ");
+    io::stdout().flush()?;
+
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES"))
+}
+
+fn approve_tool_interactively(request: &ToolApprovalRequest) -> Result<bool> {
+    println!("{} wants to {}", request.tool_name(), request.summary());
+    print!("approve? [y/N] ");
     io::stdout().flush()?;
 
     let mut answer = String::new();
