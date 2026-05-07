@@ -5,6 +5,8 @@ use std::{
     pin::Pin,
 };
 
+use clap::Parser;
+
 use crate::{
     Error, Result, agent,
     anthropic::Anthropic,
@@ -16,8 +18,21 @@ use crate::{
     openai::OpenAi,
     policy::PermissionMode,
     provider::Provider,
-    session::Message,
+    session::{
+        Message, MessageContent, Session, current_project_path, is_resumable,
+        list_resumable_project_sessions, load_most_recent_session, load_session, save_session,
+    },
 };
+
+#[derive(Debug, Parser)]
+#[command(name = "cawir", about = "Coding Agent Written in Rust")]
+struct Cli {
+    #[arg(long, value_name = "ID", conflicts_with = "continue_session")]
+    resume: Option<String>,
+
+    #[arg(long = "continue", conflicts_with = "resume")]
+    continue_session: bool,
+}
 
 type CommandFuture<'a> =
     Pin<Box<dyn Future<Output = std::result::Result<CommandOutcome, String>> + 'a>>;
@@ -40,6 +55,7 @@ impl CommandRegistry {
                 Box::new(ProviderCommand),
                 Box::new(ModelCommand),
                 Box::new(ModeCommand),
+                Box::new(ResumeCommand),
             ],
         }
     }
@@ -66,12 +82,21 @@ struct CommandContext<'a> {
     model: &'a mut String,
     model_preferences: &'a mut BTreeMap<String, String>,
     client: &'a reqwest::Client,
-    mode: &'a mut PermissionMode,
+    session: &'a mut Session,
 }
 
 enum CommandOutcome {
     Continue,
     Exit,
+}
+
+struct Runtime {
+    provider: ActiveProvider,
+    credential: ActiveCredential,
+    model: String,
+    model_preferences: BTreeMap<String, String>,
+    client: reqwest::Client,
+    command_registry: CommandRegistry,
 }
 
 struct ExitCommand;
@@ -166,7 +191,22 @@ impl Command for ModeCommand {
 
     fn run<'a>(&'a self, args: &'a str, context: CommandContext<'a>) -> CommandFuture<'a> {
         Box::pin(async move {
-            switch_mode(args, context.mode)?;
+            switch_mode(args, &mut context.session.mode)?;
+            Ok(CommandOutcome::Continue)
+        })
+    }
+}
+
+struct ResumeCommand;
+
+impl Command for ResumeCommand {
+    fn name(&self) -> &'static str {
+        "/resume"
+    }
+
+    fn run<'a>(&'a self, args: &'a str, context: CommandContext<'a>) -> CommandFuture<'a> {
+        Box::pin(async move {
+            resume_session(args, context).await?;
             Ok(CommandOutcome::Continue)
         })
     }
@@ -252,24 +292,55 @@ impl Provider for ActiveProvider {
 }
 
 pub async fn run() -> Result<()> {
+    let cli = Cli::parse();
     load_dotenv()?;
 
     let client = reqwest::Client::builder().user_agent("cawir/0.1").build()?;
     let preference = load_provider_preference()?;
-    let (mut provider, mut credential) = startup_provider(preference.as_ref(), &client).await?;
+    let resumed_session = load_requested_session(&cli)?;
+    let is_resuming = resumed_session.is_some();
+
+    let (provider, credential) = if let Some(session) = &resumed_session {
+        startup_provider_for_session(session, &client).await?
+    } else {
+        startup_provider(preference.as_ref(), &client).await?
+    };
+
     let mut model_preferences = preference
         .as_ref()
         .map(|preference| preference.models.clone())
         .unwrap_or_default();
-    let mut model = model_for_provider(&provider, &credential, &model_preferences);
+    let model = resumed_session
+        .as_ref()
+        .map(|session| session.model.clone())
+        .unwrap_or_else(|| model_for_provider(&provider, &credential, &model_preferences));
     model_preferences.insert(model_preference_key(&provider, &credential), model.clone());
     save_current_preference(&provider, &credential, &model_preferences)?;
-    print_active_provider(&provider, &credential, &model);
 
-    let mut history: Vec<Message> = Vec::new();
-    let mut mode = PermissionMode::Default;
-    let command_registry = CommandRegistry::builtins();
-    println!("mode: {}", mode.name());
+    let mut runtime = Runtime {
+        provider,
+        credential,
+        model,
+        model_preferences,
+        client,
+        command_registry: CommandRegistry::builtins(),
+    };
+    let mut session = resumed_session.unwrap_or_else(|| {
+        Session::new(
+            runtime.provider.name(),
+            runtime.credential.option_name(),
+            &runtime.model,
+        )
+    });
+    sync_session_from_runtime(&mut session, &runtime);
+    save_session_if_needed(&mut session, is_resuming)?;
+
+    print_active_provider(&runtime.provider, &runtime.credential, &runtime.model);
+    println!("session: {}", session.id);
+    println!("mode: {}", session.mode.name());
+    if is_resuming {
+        print_transcript(&session);
+    }
 
     loop {
         print!("cawir> ");
@@ -289,42 +360,239 @@ pub async fn run() -> Result<()> {
 
         if trimmed.starts_with('/') {
             let context = CommandContext {
-                provider: &mut provider,
-                credential: &mut credential,
-                model: &mut model,
-                model_preferences: &mut model_preferences,
-                client: &client,
-                mode: &mut mode,
+                provider: &mut runtime.provider,
+                credential: &mut runtime.credential,
+                model: &mut runtime.model,
+                model_preferences: &mut runtime.model_preferences,
+                client: &runtime.client,
+                session: &mut session,
             };
 
-            match command_registry.execute(trimmed, context).await {
-                Some(Ok(CommandOutcome::Continue)) => {}
-                Some(Ok(CommandOutcome::Exit)) => break,
+            match runtime.command_registry.execute(trimmed, context).await {
+                Some(Ok(CommandOutcome::Continue)) => {
+                    sync_session_from_runtime(&mut session, &runtime);
+                    save_session_if_needed(&mut session, is_resuming)?;
+                }
+                Some(Ok(CommandOutcome::Exit)) => {
+                    sync_session_from_runtime(&mut session, &runtime);
+                    save_session_if_needed(&mut session, is_resuming)?;
+                    break;
+                }
                 Some(Err(error)) => println!("{}", error),
                 None => println!("unknown command: {}", trimmed),
             }
             continue;
         }
 
-        let history_len_before_turn = history.len();
-        history.push(Message::user_text(trimmed));
+        let history_len_before_turn = session.messages.len();
+        session.messages.push(Message::user_text(trimmed));
 
         if let Err(e) = run_agent_until_complete(
-            &provider,
-            &client,
-            &credential,
-            &model,
-            &mut mode,
-            &mut history,
+            &runtime.provider,
+            &runtime.client,
+            &runtime.credential,
+            &runtime.model,
+            &mut session.mode,
+            &mut session.messages,
         )
         .await
         {
             eprintln!("error: {}", e);
-            history.truncate(history_len_before_turn);
+            session.messages.truncate(history_len_before_turn);
         }
+        sync_session_from_runtime(&mut session, &runtime);
+        save_session_if_needed(&mut session, is_resuming)?;
     }
 
     Ok(())
+}
+
+fn load_requested_session(cli: &Cli) -> Result<Option<Session>> {
+    if let Some(id) = &cli.resume {
+        let session = load_session(id)?;
+        println!("resuming session: {}", session.id);
+        return Ok(Some(session));
+    }
+
+    if cli.continue_session {
+        let Some(session) = load_most_recent_session()? else {
+            return Err(Error::Env(
+                "no saved sessions found for --continue".to_string(),
+            ));
+        };
+        println!("continuing session: {}", session.id);
+        return Ok(Some(session));
+    }
+
+    Ok(None)
+}
+
+async fn startup_provider_for_session(
+    session: &Session,
+    client: &reqwest::Client,
+) -> Result<(ActiveProvider, ActiveCredential)> {
+    let provider = provider_by_name(&session.provider)
+        .map_err(|message| Error::Env(format!("saved session has unknown provider: {message}")))?;
+    let preference = ProviderPreference {
+        provider: session.provider.clone(),
+        auth_option: session.auth_option.clone(),
+        models: BTreeMap::from([(
+            model_preference_key_parts(&session.provider, &session.auth_option),
+            session.model.clone(),
+        )]),
+    };
+    let credential = credential_for_provider(&provider, Some(&preference), client).await?;
+
+    Ok((provider, credential))
+}
+
+fn sync_session_from_runtime(session: &mut Session, runtime: &Runtime) {
+    session.provider = runtime.provider.name().to_string();
+    session.auth_option = runtime.credential.option_name().to_string();
+    session.model = runtime.model.clone();
+    if session.project_path.is_none() {
+        session.project_path = current_project_path();
+    }
+}
+
+fn save_session_if_needed(session: &mut Session, was_loaded_from_disk: bool) -> Result<()> {
+    if was_loaded_from_disk || is_resumable(session) {
+        save_session(session)?;
+    }
+
+    Ok(())
+}
+
+async fn resume_session(
+    input: &str,
+    context: CommandContext<'_>,
+) -> std::result::Result<(), String> {
+    let mut words = input.split_whitespace();
+    let Some(id) = words.next() else {
+        print_resume_sessions(context.session).map_err(|error| error.to_string())?;
+        return Ok(());
+    };
+
+    if words.next().is_some() {
+        return Err(resume_usage());
+    }
+
+    let new_session = load_session(id).map_err(|error| error.to_string())?;
+    let (new_provider, new_credential) = startup_provider_for_session(&new_session, context.client)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    *context.provider = new_provider;
+    *context.credential = new_credential;
+    *context.model = new_session.model.clone();
+    context.model_preferences.insert(
+        model_preference_key(context.provider, context.credential),
+        context.model.clone(),
+    );
+    save_current_preference(
+        context.provider,
+        context.credential,
+        context.model_preferences,
+    )
+    .map_err(|error| error.to_string())?;
+    *context.session = new_session;
+
+    println!("resumed session: {}", context.session.id);
+    print_active_provider(context.provider, context.credential, context.model);
+    println!("mode: {}", context.session.mode.name());
+    print_transcript(context.session);
+    Ok(())
+}
+
+fn print_resume_sessions(current_session: &Session) -> Result<()> {
+    let sessions = list_resumable_project_sessions()?
+        .into_iter()
+        .filter(|session| session.id != current_session.id)
+        .collect::<Vec<_>>();
+    if sessions.is_empty() {
+        println!("saved sessions for this project: none");
+        return Ok(());
+    }
+
+    println!("saved sessions for this project:");
+    for session in sessions {
+        println!("  {}", session_summary_line(&session));
+    }
+    println!();
+    println!("use: /resume <session-id>");
+    Ok(())
+}
+
+fn session_summary_line(session: &Session) -> String {
+    format!(
+        "{}  {}  {}  {} messages  updated {}",
+        session.id,
+        session.provider,
+        session.model,
+        session.messages.len(),
+        session.updated_at
+    )
+}
+
+fn print_transcript(session: &Session) {
+    if session.messages.is_empty() {
+        println!("transcript: empty");
+        return;
+    }
+
+    println!();
+    println!("previous conversation:");
+    for message in &session.messages {
+        let rendered = render_message_for_transcript(message);
+        if !rendered.is_empty() {
+            println!("{}: {}", message.role, rendered);
+        }
+    }
+    println!();
+}
+
+fn render_message_for_transcript(message: &Message) -> String {
+    message
+        .content
+        .iter()
+        .map(render_content_for_transcript)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_content_for_transcript(content: &MessageContent) -> String {
+    match content {
+        MessageContent::Text { text } => text.clone(),
+        MessageContent::ToolUse { name, input, .. } => {
+            format!("tool_use: {name} {}", compact_json(input))
+        }
+        MessageContent::ToolResult {
+            content, is_error, ..
+        } => {
+            let status = if *is_error {
+                "tool_result error"
+            } else {
+                "tool_result"
+            };
+            format!("{status}: {}", truncate_for_transcript(content))
+        }
+    }
+}
+
+fn compact_json(value: &serde_json::Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
+}
+
+fn truncate_for_transcript(value: &str) -> String {
+    const MAX_CHARS: usize = 240;
+
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
 }
 
 async fn run_agent_until_complete<P: Provider>(
@@ -681,6 +949,8 @@ fn print_help() {
     println!("  /provider            list providers");
     println!("  /provider <name>     switch providers");
     println!("  /provider <name> <credential-option> --reset");
+    println!("  /resume              list saved sessions");
+    println!("  /resume <id>         switch to a saved session");
 }
 
 fn switch_mode(input: &str, mode: &mut PermissionMode) -> std::result::Result<(), String> {
@@ -827,9 +1097,15 @@ fn mode_usage() -> String {
     "usage: /mode [default|plan|accept-edits|bypass]".to_string()
 }
 
+fn resume_usage() -> String {
+    "usage: /resume <session-id>".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::is_resumable;
+    use serde_json::json;
 
     #[test]
     fn model_preference_key_includes_provider_and_auth_option() {
@@ -860,5 +1136,70 @@ mod tests {
 
         assert!(error.contains("unknown mode: turbo"));
         assert_eq!(mode, PermissionMode::Default);
+    }
+
+    #[test]
+    fn resume_usage_names_resume_command() {
+        assert_eq!(resume_usage(), "usage: /resume <session-id>");
+    }
+
+    #[test]
+    fn transcript_renders_text_and_summarizes_tool_blocks() {
+        let message = Message {
+            role: "assistant".to_string(),
+            content: vec![
+                MessageContent::Text {
+                    text: "I will inspect the file.".to_string(),
+                },
+                MessageContent::ToolUse {
+                    id: "toolu_123".to_string(),
+                    name: "read_file".to_string(),
+                    input: json!({ "path": "Cargo.toml" }),
+                },
+            ],
+        };
+
+        let rendered = render_message_for_transcript(&message);
+
+        assert!(rendered.contains("I will inspect the file."));
+        assert!(rendered.contains(r#"tool_use: read_file {"path":"Cargo.toml"}"#));
+    }
+
+    #[test]
+    fn transcript_truncates_long_tool_results() {
+        let rendered = truncate_for_transcript(&"x".repeat(300));
+
+        assert_eq!(rendered.len(), 243);
+        assert!(rendered.ends_with("..."));
+    }
+
+    #[test]
+    fn session_summary_line_includes_resume_id_and_metadata() {
+        let mut session = Session::new("ollama", "none", "qwen3:8b");
+        session.id = "session-id".to_string();
+        session.updated_at = 123;
+        session.messages.push(Message::user_text("hello"));
+
+        let line = session_summary_line(&session);
+
+        assert_eq!(
+            line,
+            "session-id  ollama  qwen3:8b  1 messages  updated 123"
+        );
+    }
+
+    #[test]
+    fn empty_sessions_are_not_resumable_conversations() {
+        let session = Session::new("ollama", "none", "qwen3:8b");
+
+        assert!(!is_resumable(&session));
+    }
+
+    #[test]
+    fn sessions_with_messages_are_resumable_conversations() {
+        let mut session = Session::new("ollama", "none", "qwen3:8b");
+        session.messages.push(Message::user_text("hello"));
+
+        assert!(is_resumable(&session));
     }
 }
