@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 use crate::{
     Error, Result,
+    events::AgentEvent,
     policy::{PermissionDecision, PermissionMode, ToolKind, permission_decision},
     provider::ToolDefinition,
     session::{MessageContent, ToolResult},
@@ -265,21 +266,36 @@ impl Tool for ExitPlanModeTool {
     }
 }
 
-pub(crate) fn execute_tool_uses(blocks: &[MessageContent], mode: PermissionMode) -> ToolExecution {
+pub(crate) fn execute_tool_uses<F>(
+    blocks: &[MessageContent],
+    mode: PermissionMode,
+    mut emit: F,
+) -> ToolExecution
+where
+    F: FnMut(AgentEvent),
+{
     let registry = ToolRegistry::builtins();
     let mut results = Vec::new();
     let mut plan_ready = None;
 
     for block in blocks {
         match block {
-            MessageContent::Text { text } => {
-                println!("claude: {}", text);
-            }
+            MessageContent::Text { .. } => {}
             MessageContent::ToolUse { id, name, input } => {
-                println!("tool request: {} ({})", name, id);
+                emit(AgentEvent::ToolUseRequested {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                });
                 match registry.execute(name, input, mode) {
                     Ok(ToolOutput::Result(content)) => {
-                        print_tool_result(name, &content);
+                        emit(AgentEvent::ToolUseFinished {
+                            id: id.clone(),
+                            name: name.clone(),
+                            output_len: content.len(),
+                            is_error: false,
+                            error: None,
+                        });
                         results.push(ToolResult {
                             tool_use_id: id.clone(),
                             content,
@@ -287,7 +303,13 @@ pub(crate) fn execute_tool_uses(blocks: &[MessageContent], mode: PermissionMode)
                         });
                     }
                     Ok(ToolOutput::PlanReady(plan)) => {
-                        println!("plan ready for approval");
+                        emit(AgentEvent::ToolUseFinished {
+                            id: id.clone(),
+                            name: name.clone(),
+                            output_len: plan.len(),
+                            is_error: false,
+                            error: None,
+                        });
                         plan_ready = Some(PlanReady {
                             tool_use_id: Some(id.clone()),
                             plan,
@@ -295,7 +317,13 @@ pub(crate) fn execute_tool_uses(blocks: &[MessageContent], mode: PermissionMode)
                     }
                     Err(error) => {
                         let content = error.to_string();
-                        print_tool_error(name, &content);
+                        emit(AgentEvent::ToolUseFinished {
+                            id: id.clone(),
+                            name: name.clone(),
+                            output_len: content.len(),
+                            is_error: true,
+                            error: Some(content.clone()),
+                        });
                         results.push(ToolResult {
                             tool_use_id: id.clone(),
                             content,
@@ -561,14 +589,6 @@ fn format_shell_output(output: &std::process::Output) -> String {
     format!("{}\nstdout:\n{}\nstderr:\n{}", status, stdout, stderr)
 }
 
-fn print_tool_result(name: &str, result: &str) {
-    println!("tool result from {}: {} bytes", name, result.len());
-}
-
-fn print_tool_error(name: &str, error: &str) {
-    println!("tool error from {}: {}", name, error);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -605,7 +625,7 @@ mod tests {
             },
         ];
 
-        let execution = execute_tool_uses(&blocks, PermissionMode::Default);
+        let execution = execute_tool_uses(&blocks, PermissionMode::Default, |_| {});
 
         assert_eq!(
             execution.results,
@@ -635,7 +655,7 @@ mod tests {
             input: json!({}),
         }];
 
-        let execution = execute_tool_uses(&blocks, PermissionMode::Default);
+        let execution = execute_tool_uses(&blocks, PermissionMode::Default, |_| {});
 
         assert_eq!(
             execution.results,
@@ -646,6 +666,60 @@ mod tests {
                 is_error: true,
             }]
         );
+    }
+
+    #[test]
+    fn tool_execution_emits_progress_events_separate_from_results() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "cawir-tool-event-test-{}-{}.txt",
+            std::process::id(),
+            unique
+        ));
+        std::fs::write(&path, "event result").unwrap();
+
+        let input = json!({ "path": path.to_string_lossy() });
+        let blocks = vec![MessageContent::ToolUse {
+            id: "toolu_event".to_string(),
+            name: "read_file".to_string(),
+            input: input.clone(),
+        }];
+        let mut events = Vec::new();
+
+        let execution = execute_tool_uses(&blocks, PermissionMode::Default, |event| {
+            events.push(event);
+        });
+
+        assert_eq!(
+            events,
+            vec![
+                AgentEvent::ToolUseRequested {
+                    id: "toolu_event".to_string(),
+                    name: "read_file".to_string(),
+                    input,
+                },
+                AgentEvent::ToolUseFinished {
+                    id: "toolu_event".to_string(),
+                    name: "read_file".to_string(),
+                    output_len: "event result".len(),
+                    is_error: false,
+                    error: None,
+                }
+            ]
+        );
+        assert_eq!(
+            execution.results,
+            vec![ToolResult {
+                tool_use_id: "toolu_event".to_string(),
+                content: "event result".to_string(),
+                is_error: false,
+            }]
+        );
+
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -676,7 +750,7 @@ mod tests {
             input: json!({ "plan": "1. Inspect\n2. Edit\n3. Test" }),
         }];
 
-        let execution = execute_tool_uses(&blocks, PermissionMode::Plan);
+        let execution = execute_tool_uses(&blocks, PermissionMode::Plan, |_| {});
 
         assert_eq!(execution.results, Vec::new());
         assert_eq!(

@@ -14,6 +14,7 @@ use crate::{
         ActiveCredential, AuthOption, ProviderPreference, acquire_codex_oauth, find_option,
         load_provider_preference, resolve_for_provider, save_api_key, save_provider_preference,
     },
+    events::AgentEvent,
     ollama::Ollama,
     openai::OpenAi,
     policy::PermissionMode,
@@ -385,7 +386,8 @@ pub async fn run() -> Result<()> {
         }
 
         let history_len_before_turn = session.messages.len();
-        session.messages.push(Message::user_text(trimmed));
+        let mut render = render_agent_event;
+        agent::submit_user_prompt(trimmed, &mut session.messages, &mut render);
 
         if let Err(e) = run_agent_until_complete(
             &runtime.provider,
@@ -394,6 +396,7 @@ pub async fn run() -> Result<()> {
             &runtime.model,
             &mut session.mode,
             &mut session.messages,
+            &mut render,
         )
         .await
         {
@@ -602,9 +605,10 @@ async fn run_agent_until_complete<P: Provider>(
     model: &str,
     mode: &mut PermissionMode,
     history: &mut Vec<Message>,
+    emit: &mut impl FnMut(AgentEvent),
 ) -> Result<()> {
     loop {
-        match agent::run_turn(provider, client, credential, model, *mode, history).await? {
+        match agent::run_turn(provider, client, credential, model, *mode, history, emit).await? {
             agent::TurnOutcome::Complete => return Ok(()),
             agent::TurnOutcome::PlanReady(plan_ready) => {
                 println!();
@@ -636,6 +640,49 @@ async fn run_agent_until_complete<P: Provider>(
                     }
                 }
             }
+        }
+    }
+}
+
+fn render_agent_event(event: AgentEvent) {
+    match event {
+        AgentEvent::UserPromptSubmit { prompt } => {
+            let _ = prompt;
+        }
+        AgentEvent::ModelRequestStart { provider, model } => {
+            let _ = (provider, model);
+        }
+        AgentEvent::ToolUseRequested { id, name, input } => {
+            let _ = input;
+            println!("tool request: {} ({})", name, id);
+        }
+        AgentEvent::ToolUseFinished {
+            name,
+            output_len,
+            is_error,
+            error,
+            ..
+        } => {
+            if is_error {
+                println!(
+                    "tool error from {}: {}",
+                    name,
+                    error.unwrap_or_else(|| "unknown tool error".to_string())
+                );
+            } else if name == "exit_plan_mode" {
+                println!("plan ready for approval");
+            } else {
+                println!("tool result from {}: {} bytes", name, output_len);
+            }
+        }
+        AgentEvent::AssistantText { provider, text } => {
+            println!("{}: {}", provider, text);
+        }
+        AgentEvent::Stop { reason } => {
+            let _ = reason;
+        }
+        AgentEvent::StopFailure { message } => {
+            let _ = message;
         }
     }
 }

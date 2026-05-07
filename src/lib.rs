@@ -2,6 +2,7 @@ mod agent;
 mod anthropic;
 mod auth;
 pub mod error;
+mod events;
 mod ollama;
 mod openai;
 mod policy;
