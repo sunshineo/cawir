@@ -1,6 +1,10 @@
 use std::{
+    fs::File,
+    io::{ErrorKind, Read},
     path::{Component, Path, PathBuf},
-    process::Command,
+    process::{Command, Output, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 use serde_json::{Value, json};
@@ -12,6 +16,12 @@ use crate::{
     provider::ToolDefinition,
     session::{MessageContent, ToolResult},
 };
+
+const READ_FILE_MAX_BYTES: usize = 64 * 1024;
+const LIST_FILES_MAX_ENTRIES: usize = 200;
+const SHELL_OUTPUT_MAX_BYTES: usize = 32 * 1024;
+const SHELL_TIMEOUT: Duration = Duration::from_secs(30);
+const SHELL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 trait Tool {
     fn name(&self) -> &'static str;
@@ -688,26 +698,76 @@ fn outside_project_error(tool: &str, input_path: &str, context: &ToolContext) ->
 }
 
 fn execute_list_files(path: &Path) -> Result<String> {
-    let mut entries = std::fs::read_dir(path)?
-        .map(|entry| -> Result<String> {
-            let entry = entry?;
-            let file_type = entry.file_type()?;
-            let mut name = entry.file_name().to_string_lossy().into_owned();
+    let mut entries = Vec::new();
+    let mut truncated = false;
 
-            if file_type.is_dir() {
-                name.push('/');
-            }
+    for entry in std::fs::read_dir(path)? {
+        if entries.len() == LIST_FILES_MAX_ENTRIES {
+            truncated = true;
+            break;
+        }
 
-            Ok(name)
-        })
-        .collect::<Result<Vec<_>>>()?;
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let mut name = entry.file_name().to_string_lossy().into_owned();
+
+        if file_type.is_dir() {
+            name.push('/');
+        }
+
+        entries.push(name);
+    }
 
     entries.sort();
-    Ok(entries.join("\n"))
+    let mut output = entries.join("\n");
+
+    if truncated {
+        append_truncation_marker(
+            &mut output,
+            format!(
+                "list_files returned the first {} entries from {}; directory has more entries",
+                LIST_FILES_MAX_ENTRIES,
+                path.display()
+            ),
+        );
+    }
+
+    Ok(output)
 }
 
 fn execute_read_file(path: &Path) -> Result<String> {
-    Ok(std::fs::read_to_string(path)?)
+    let mut file = File::open(path)?;
+    let total_bytes = file.metadata()?.len();
+    let mut bytes = Vec::new();
+
+    file.by_ref()
+        .take((READ_FILE_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+
+    let truncated = bytes.len() > READ_FILE_MAX_BYTES;
+    let visible_bytes = if truncated {
+        &bytes[..READ_FILE_MAX_BYTES]
+    } else {
+        &bytes
+    };
+    let prefix_len = utf8_prefix_len(visible_bytes)?;
+    let mut output = std::str::from_utf8(&visible_bytes[..prefix_len])
+        .map_err(invalid_utf8_error)?
+        .to_string();
+
+    if truncated {
+        append_truncation_marker(
+            &mut output,
+            format!(
+                "read_file returned the first {} valid UTF-8 bytes of {} bytes from {}",
+                prefix_len,
+                total_bytes,
+                path.display()
+            ),
+        );
+    }
+
+    Ok(output)
 }
 
 fn execute_write_file(path: &Path, content: &str) -> Result<String> {
@@ -721,9 +781,77 @@ fn execute_write_file(path: &Path, content: &str) -> Result<String> {
 }
 
 fn execute_shell(command: &str) -> Result<String> {
-    let output = Command::new("sh").arg("-c").arg(command).output()?;
+    execute_shell_with_timeout(command, SHELL_TIMEOUT)
+}
 
-    Ok(format_shell_output(&output))
+fn execute_shell_with_timeout(command: &str, timeout: Duration) -> Result<String> {
+    let mut process = Command::new("sh");
+    process
+        .arg("-c")
+        .arg(command)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        process.process_group(0);
+    }
+
+    let mut child = process.spawn()?;
+    let start = Instant::now();
+
+    loop {
+        if child.try_wait()?.is_some() {
+            let output = child.wait_with_output()?;
+            return Ok(format_shell_output(ShellOutput::Finished(output)));
+        }
+
+        if start.elapsed() >= timeout {
+            terminate_shell_process(&mut child)?;
+
+            let output = child.wait_with_output()?;
+            return Ok(format_shell_output(ShellOutput::TimedOut {
+                output,
+                timeout,
+            }));
+        }
+
+        thread::sleep(SHELL_POLL_INTERVAL);
+    }
+}
+
+#[cfg(unix)]
+fn terminate_shell_process(child: &mut std::process::Child) -> Result<()> {
+    let process_group = format!("-{}", child.id());
+
+    let _ = Command::new("kill")
+        .arg("-TERM")
+        .arg(&process_group)
+        .status();
+    thread::sleep(SHELL_POLL_INTERVAL);
+
+    if child.try_wait()?.is_none() {
+        let _ = Command::new("kill")
+            .arg("-KILL")
+            .arg(&process_group)
+            .status();
+    }
+
+    kill_direct_child(child)
+}
+
+#[cfg(not(unix))]
+fn terminate_shell_process(child: &mut std::process::Child) -> Result<()> {
+    kill_direct_child(child)
+}
+
+fn kill_direct_child(child: &mut std::process::Child) -> Result<()> {
+    match child.kill() {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::InvalidInput => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn catastrophic_shell_denial(command: &str) -> Option<&'static str> {
@@ -753,15 +881,95 @@ fn catastrophic_shell_denial(command: &str) -> Option<&'static str> {
         .then_some("refusing catastrophic shell command")
 }
 
-fn format_shell_output(output: &std::process::Output) -> String {
-    let status = match output.status.code() {
-        Some(code) => format!("exit status: {}", code),
-        None => "exit status: terminated by signal".to_string(),
+enum ShellOutput {
+    Finished(Output),
+    TimedOut { output: Output, timeout: Duration },
+}
+
+fn format_shell_output(run: ShellOutput) -> String {
+    let (status, output) = match run {
+        ShellOutput::Finished(output) => {
+            let status = match output.status.code() {
+                Some(code) => format!("exit status: {}", code),
+                None => "exit status: terminated by signal".to_string(),
+            };
+            (status, output)
+        }
+        ShellOutput::TimedOut { output, timeout } => (
+            format!("exit status: timed out after {}", format_duration(timeout)),
+            output,
+        ),
     };
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = budgeted_lossy_output("stdout", &output.stdout, SHELL_OUTPUT_MAX_BYTES);
+    let stderr = budgeted_lossy_output("stderr", &output.stderr, SHELL_OUTPUT_MAX_BYTES);
 
     format!("{}\nstdout:\n{}\nstderr:\n{}", status, stdout, stderr)
+}
+
+fn budgeted_lossy_output(label: &str, bytes: &[u8], max_bytes: usize) -> String {
+    let truncated = bytes.len() > max_bytes;
+    let visible_bytes = if truncated {
+        let prefix_len = utf8_lossy_prefix_len(&bytes[..max_bytes]);
+        &bytes[..prefix_len]
+    } else {
+        bytes
+    };
+    let mut output = String::from_utf8_lossy(visible_bytes).into_owned();
+
+    if truncated {
+        append_truncation_marker(
+            &mut output,
+            format!(
+                "{} returned the first {} bytes of {} bytes",
+                label,
+                visible_bytes.len(),
+                bytes.len()
+            ),
+        );
+    }
+
+    output
+}
+
+fn utf8_prefix_len(bytes: &[u8]) -> std::io::Result<usize> {
+    match std::str::from_utf8(bytes) {
+        Ok(_) => Ok(bytes.len()),
+        Err(error) if error.error_len().is_none() => Ok(error.valid_up_to()),
+        Err(error) => Err(invalid_utf8_error(error)),
+    }
+}
+
+fn utf8_lossy_prefix_len(bytes: &[u8]) -> usize {
+    match std::str::from_utf8(bytes) {
+        Ok(_) => bytes.len(),
+        Err(error) if error.error_len().is_none() => error.valid_up_to(),
+        Err(_) => bytes.len(),
+    }
+}
+
+fn invalid_utf8_error(error: std::str::Utf8Error) -> std::io::Error {
+    std::io::Error::new(
+        ErrorKind::InvalidData,
+        format!("file is not valid UTF-8: {error}"),
+    )
+}
+
+fn append_truncation_marker(output: &mut String, detail: String) {
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+
+    output.push_str("[tool output truncated: ");
+    output.push_str(&detail);
+    output.push(']');
+}
+
+fn format_duration(duration: Duration) -> String {
+    if duration.as_millis() < 1_000 {
+        format!("{}ms", duration.as_millis())
+    } else {
+        format!("{}s", duration.as_secs())
+    }
 }
 
 #[cfg(test)]
@@ -949,6 +1157,41 @@ mod tests {
     }
 
     #[test]
+    fn read_file_truncates_large_files_with_a_visible_marker() {
+        let path = project_test_path("large-read-file.txt");
+        let content = "a".repeat(READ_FILE_MAX_BYTES + 10);
+
+        std::fs::write(&path, content).unwrap();
+
+        let input = json!({ "path": path.to_string_lossy() });
+        let result = execute_tool_call("read_file", &input, PermissionMode::Default).unwrap();
+
+        assert!(result.starts_with(&"a".repeat(READ_FILE_MAX_BYTES)));
+        assert!(result.contains("[tool output truncated: read_file returned the first"));
+        assert!(result.contains("valid UTF-8 bytes"));
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn read_file_truncation_does_not_split_utf8_characters() {
+        let path = project_test_path("utf8-boundary-read-file.txt");
+        let content = format!("{}étail", "a".repeat(READ_FILE_MAX_BYTES - 1));
+
+        std::fs::write(&path, content).unwrap();
+
+        let input = json!({ "path": path.to_string_lossy() });
+        let result = execute_tool_call("read_file", &input, PermissionMode::Default).unwrap();
+
+        assert!(result.starts_with(&"a".repeat(READ_FILE_MAX_BYTES - 1)));
+        assert!(!result.contains('é'));
+        assert!(!result.contains('�'));
+        assert!(result.contains("[tool output truncated: read_file returned the first"));
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn read_file_requires_a_string_path() {
         let error =
             execute_tool_call("read_file", &json!({}), PermissionMode::Default).unwrap_err();
@@ -974,6 +1217,24 @@ mod tests {
         let result = execute_tool_call("list_files", &input, PermissionMode::Default).unwrap();
 
         assert_eq!(result, "Cargo.toml\nsrc/");
+
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn list_files_truncates_large_directories_with_a_visible_marker() {
+        let path = project_test_path("large-list-files");
+
+        std::fs::create_dir(&path).unwrap();
+        for index in 0..(LIST_FILES_MAX_ENTRIES + 5) {
+            std::fs::write(path.join(format!("{index:03}.txt")), "").unwrap();
+        }
+
+        let input = json!({ "path": path.to_string_lossy() });
+        let result = execute_tool_call("list_files", &input, PermissionMode::Default).unwrap();
+
+        assert!(result.contains("[tool output truncated: list_files returned the first"));
+        assert!(result.contains("directory has more entries"));
 
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -1163,6 +1424,31 @@ mod tests {
             result,
             "exit status: 0\nstdout:\nhello from stdout\nstderr:\nhello from stderr"
         );
+    }
+
+    #[test]
+    fn shell_truncates_stdout_and_stderr_with_visible_markers() {
+        let stdout = vec![b'a'; SHELL_OUTPUT_MAX_BYTES + 10];
+        let stderr = vec![b'b'; SHELL_OUTPUT_MAX_BYTES + 20];
+        let output = Output {
+            status: Command::new("sh").arg("-c").arg("exit 0").status().unwrap(),
+            stdout,
+            stderr,
+        };
+
+        let result = format_shell_output(ShellOutput::Finished(output));
+
+        assert!(result.contains("[tool output truncated: stdout returned the first"));
+        assert!(result.contains("[tool output truncated: stderr returned the first"));
+    }
+
+    #[test]
+    fn shell_timeout_kills_long_running_commands() {
+        let result =
+            execute_shell_with_timeout("while true; do :; done", Duration::from_millis(50))
+                .unwrap();
+
+        assert!(result.starts_with("exit status: timed out after 50ms"));
     }
 
     #[test]

@@ -36,6 +36,26 @@ Those become error tool results.
 
 ## Output budgets
 
-Shell can produce huge output. Treating stdout and stderr as one string is acceptable for the first working tool, but future checkpoints should add output caps and truncation markers.
+Shell can produce huge output. Checkpoint 8.5b added output caps and truncation markers so stdout and stderr cannot flood conversation history.
 
 This belongs with the broader tool-output budgeting work: read tools, shell tools, and future search tools can all inject large content into history.
+
+stdout and stderr are capped separately because they carry different meanings. For example, a command can produce a lot of normal output on stdout while the useful failure clue is a small stderr message, or vice versa. Keeping separate budgets preserves that distinction.
+
+## Shell timeouts and process trees
+
+Shell commands need a runtime limit for the same reason agent loops need a tool-round limit: a local process can hang forever.
+
+There is an extra wrinkle with shell commands. cawir runs terminal-like commands through `sh -c`, so the direct child process may be the shell wrapper, not the command doing the work. Killing only the shell can leave a grandchild process behind.
+
+On Unix, cawir starts the shell in its own process group and signals the group on timeout. That makes cleanup target the whole command tree for ordinary shell-launched processes. A direct child kill remains as a fallback and for non-Unix platforms.
+
+The agent-design lesson is that "run a command" is not one thing:
+
+- starting a process
+- collecting output
+- enforcing a timeout
+- cleaning up children
+- deciding what counts as tool failure vs useful command output
+
+Each part needs an explicit policy once shell becomes an agent tool.
