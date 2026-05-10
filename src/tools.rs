@@ -56,6 +56,7 @@ impl ToolRegistry {
                 Box::new(ListFilesTool),
                 Box::new(ReadFileTool),
                 Box::new(WriteFileTool),
+                Box::new(EditFileTool),
                 Box::new(ShellTool),
                 Box::new(ExitPlanModeTool),
             ],
@@ -118,11 +119,28 @@ struct PreparedToolCall {
 }
 
 enum PreparedToolInput {
-    ReadFile { path: PathBuf },
-    ListFiles { path: PathBuf },
-    WriteFile { path: PathBuf, content: String },
-    Shell { command: String },
-    ExitPlanMode { plan: String },
+    ReadFile {
+        path: PathBuf,
+    },
+    ListFiles {
+        path: PathBuf,
+    },
+    WriteFile {
+        path: PathBuf,
+        content: String,
+    },
+    EditFile {
+        path: PathBuf,
+        old_string: String,
+        new_string: String,
+        replace_all: bool,
+    },
+    Shell {
+        command: String,
+    },
+    ExitPlanMode {
+        plan: String,
+    },
 }
 
 pub(crate) struct ToolApprovalRequest {
@@ -358,6 +376,91 @@ impl Tool for WriteFileTool {
         };
 
         execute_write_file(&path, &content).map(ToolOutput::Result)
+    }
+}
+
+struct EditFileTool;
+
+impl Tool for EditFileTool {
+    fn name(&self) -> &'static str {
+        "edit_file"
+    }
+
+    fn description(&self) -> &'static str {
+        "Edit an existing UTF-8 text file in the current project by replacing exact text. Use this for routine changes to existing files instead of write_file. The edit will require explicit user approval before it runs."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file to edit, preferably relative to the current working directory."
+                },
+                "old_string": {
+                    "type": "string",
+                    "description": "Exact text currently in the file. By default this must match exactly once."
+                },
+                "new_string": {
+                    "type": "string",
+                    "description": "Replacement text."
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "Replace every occurrence of old_string instead of requiring a unique match. Defaults to false."
+                }
+            },
+            "required": ["path", "old_string", "new_string"],
+            "additionalProperties": false
+        })
+    }
+
+    fn kind(&self) -> ToolKind {
+        ToolKind::WriteFile
+    }
+
+    fn prepare(&self, input: &Value, context: &ToolContext) -> Result<PreparedToolCall> {
+        let raw_path = input_string(input, "edit_file", "path")?;
+        let old_string = input_string(input, "edit_file", "old_string")?;
+        let new_string = input_string(input, "edit_file", "new_string")?;
+        let replace_all = input_bool(input, "edit_file", "replace_all")?.unwrap_or(false);
+        let path = resolve_existing_project_path("edit_file", raw_path, context)?;
+
+        Ok(PreparedToolCall {
+            tool_name: self.name(),
+            kind: self.kind(),
+            approval: Some(ToolApprovalRequest {
+                tool_name: self.name(),
+                summary: format!(
+                    "replace {} bytes with {} bytes in {}",
+                    old_string.len(),
+                    new_string.len(),
+                    path.display()
+                ),
+                denial_message: format!("user denied edit to {}", path.display()),
+            }),
+            input: PreparedToolInput::EditFile {
+                path,
+                old_string: old_string.to_string(),
+                new_string: new_string.to_string(),
+                replace_all,
+            },
+        })
+    }
+
+    fn execute(&self, input: PreparedToolInput) -> Result<ToolOutput> {
+        let PreparedToolInput::EditFile {
+            path,
+            old_string,
+            new_string,
+            replace_all,
+        } = input
+        else {
+            return Err(wrong_prepared_input(self.name()));
+        };
+
+        execute_edit_file(&path, &old_string, &new_string, replace_all).map(ToolOutput::Result)
     }
 }
 
@@ -598,6 +701,16 @@ fn input_string<'a>(input: &'a Value, tool: &str, field: &str) -> Result<&'a str
         })
 }
 
+fn input_bool(input: &Value, tool: &str, field: &str) -> Result<Option<bool>> {
+    match input.get(field) {
+        Some(value) => value.as_bool().map(Some).ok_or_else(|| Error::ToolInput {
+            tool: tool.to_string(),
+            message: format!("expected input.{field} to be a boolean"),
+        }),
+        None => Ok(None),
+    }
+}
+
 fn wrong_prepared_input(tool: &str) -> Error {
     Error::ToolInput {
         tool: tool.to_string(),
@@ -777,6 +890,65 @@ fn execute_write_file(path: &Path, content: &str) -> Result<String> {
         "wrote {} bytes to {}",
         content.len(),
         path.display()
+    ))
+}
+
+fn execute_edit_file(
+    path: &Path,
+    old_string: &str,
+    new_string: &str,
+    replace_all: bool,
+) -> Result<String> {
+    if old_string == new_string {
+        return Err(Error::ToolInput {
+            tool: "edit_file".to_string(),
+            message: "old_string and new_string are identical".to_string(),
+        });
+    }
+
+    if old_string.is_empty() {
+        return Err(Error::ToolInput {
+            tool: "edit_file".to_string(),
+            message: "old_string must not be empty; use write_file for new files or full rewrites"
+                .to_string(),
+        });
+    }
+
+    let content = std::fs::read_to_string(path)?;
+    let matches = content.matches(old_string).count();
+
+    if matches == 0 {
+        return Err(Error::ToolInput {
+            tool: "edit_file".to_string(),
+            message: "old_string was not found in the file".to_string(),
+        });
+    }
+
+    if matches > 1 && !replace_all {
+        return Err(Error::ToolInput {
+            tool: "edit_file".to_string(),
+            message: format!(
+                "found {matches} matches for old_string; provide more context or set replace_all to true"
+            ),
+        });
+    }
+
+    let updated = if replace_all {
+        content.replace(old_string, new_string)
+    } else {
+        content.replacen(old_string, new_string, 1)
+    };
+
+    std::fs::write(path, updated)?;
+
+    let noun = if matches == 1 {
+        "occurrence"
+    } else {
+        "occurrences"
+    };
+    Ok(format!(
+        "edited {matches} {noun} in {}",
+        path.to_string_lossy()
     ))
 }
 
@@ -1312,6 +1484,176 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "hello from cawir\n"
         );
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn executes_edit_file_tool_call_when_approved() {
+        let path = project_test_path("edit-file.txt");
+        std::fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
+
+        let input = json!({
+            "path": path.to_string_lossy(),
+            "old_string": "beta\n",
+            "new_string": "delta\n"
+        });
+        let result =
+            execute_tool_call_with_approval("edit_file", &input, PermissionMode::Default, |_| {
+                Ok(true)
+            })
+            .unwrap();
+
+        assert_eq!(
+            result,
+            format!("edited 1 occurrence in {}", path.to_string_lossy())
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "alpha\ndelta\ngamma\n"
+        );
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn edit_file_replaces_all_matches_when_requested() {
+        let path = project_test_path("edit-file-replace-all.txt");
+        std::fs::write(&path, "name = old\nother = old\n").unwrap();
+
+        let input = json!({
+            "path": path.to_string_lossy(),
+            "old_string": "old",
+            "new_string": "new",
+            "replace_all": true
+        });
+        let result =
+            execute_tool_call_with_approval("edit_file", &input, PermissionMode::Default, |_| {
+                Ok(true)
+            })
+            .unwrap();
+
+        assert_eq!(
+            result,
+            format!("edited 2 occurrences in {}", path.to_string_lossy())
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "name = new\nother = new\n"
+        );
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn edit_file_requires_unique_match_by_default() {
+        let path = project_test_path("edit-file-ambiguous.txt");
+        std::fs::write(&path, "old\nold\n").unwrap();
+
+        let input = json!({
+            "path": path.to_string_lossy(),
+            "old_string": "old",
+            "new_string": "new"
+        });
+        let error =
+            execute_tool_call_with_approval("edit_file", &input, PermissionMode::Default, |_| {
+                Ok(true)
+            })
+            .unwrap_err();
+
+        match error {
+            Error::ToolInput { tool, message } => {
+                assert_eq!(tool, "edit_file");
+                assert!(message.contains("found 2 matches"));
+                assert!(message.contains("replace_all"));
+            }
+            other => panic!("expected tool input error, got {:?}", other),
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old\nold\n");
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn edit_file_errors_when_match_is_missing() {
+        let path = project_test_path("edit-file-missing-match.txt");
+        std::fs::write(&path, "alpha\nbeta\n").unwrap();
+
+        let input = json!({
+            "path": path.to_string_lossy(),
+            "old_string": "gamma",
+            "new_string": "delta"
+        });
+        let error =
+            execute_tool_call_with_approval("edit_file", &input, PermissionMode::Default, |_| {
+                Ok(true)
+            })
+            .unwrap_err();
+
+        match error {
+            Error::ToolInput { tool, message } => {
+                assert_eq!(tool, "edit_file");
+                assert!(message.contains("old_string was not found"));
+            }
+            other => panic!("expected tool input error, got {:?}", other),
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha\nbeta\n");
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn edit_file_denies_paths_outside_project_before_approval() {
+        let input = json!({
+            "path": "../cawir-outside-edit.txt",
+            "old_string": "old",
+            "new_string": "new"
+        });
+        let mut asked = false;
+
+        let error =
+            execute_tool_call_with_approval("edit_file", &input, PermissionMode::Default, |_| {
+                asked = true;
+                Ok(true)
+            })
+            .unwrap_err();
+
+        assert!(!asked);
+        match error {
+            Error::ToolDenied { tool, message } => {
+                assert_eq!(tool, "edit_file");
+                assert!(message.contains("outside the current project"));
+            }
+            other => panic!("expected tool denied error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn plan_mode_denies_edit_file_without_asking() {
+        let path = project_test_path("plan-denied-edit.txt");
+        std::fs::write(&path, "old\n").unwrap();
+        let input = json!({
+            "path": path.to_string_lossy(),
+            "old_string": "old",
+            "new_string": "new"
+        });
+        let mut asked = false;
+
+        let error =
+            execute_tool_call_with_approval("edit_file", &input, PermissionMode::Plan, |_| {
+                asked = true;
+                Ok(true)
+            })
+            .unwrap_err();
+
+        assert!(!asked);
+        match error {
+            Error::ToolDenied { tool, message } => {
+                assert_eq!(tool, "edit_file");
+                assert_eq!(message, "plan mode does not allow mutating tools");
+            }
+            other => panic!("expected tool denied error, got {:?}", other),
+        }
 
         std::fs::remove_file(path).unwrap();
     }
