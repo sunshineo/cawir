@@ -3,6 +3,7 @@ use serde::Serialize;
 use crate::{
     Result,
     auth::{ActiveCredential, AuthOption},
+    prompt::SystemPrompt,
     session::Message,
 };
 
@@ -38,6 +39,7 @@ pub(crate) trait Provider {
         client: &reqwest::Client,
         credential: &ActiveCredential,
         model: &str,
+        prompt: &SystemPrompt,
         messages: &[Message],
         tools: Vec<ToolDefinition>,
     ) -> Result<ProviderResponse>;
@@ -61,6 +63,7 @@ mod tests {
             .user_agent("cawir-live-test/0.1")
             .build()?;
         let messages = live_smoke_messages();
+        let prompt = crate::prompt::assemble(&std::env::current_dir()?)?;
 
         let response = match provider.as_str() {
             "anthropic" => {
@@ -77,6 +80,7 @@ mod tests {
                         &client,
                         &credential,
                         provider.default_model(&credential),
+                        &prompt,
                         &messages,
                         Vec::new(),
                     )
@@ -96,6 +100,7 @@ mod tests {
                         &client,
                         &credential,
                         provider.default_model(&credential),
+                        &prompt,
                         &messages,
                         Vec::new(),
                     )
@@ -115,6 +120,7 @@ mod tests {
                         &client,
                         &credential,
                         provider.default_model(&credential),
+                        &prompt,
                         &messages,
                         Vec::new(),
                     )
@@ -141,6 +147,7 @@ mod tests {
             .user_agent("cawir-live-test/0.1")
             .build()?;
         let messages = live_smoke_messages();
+        let prompt = crate::prompt::assemble(&std::env::current_dir()?)?;
 
         let response = match provider.as_str() {
             "anthropic" => {
@@ -154,7 +161,7 @@ mod tests {
                 .await?;
                 let model = selected_live_model(&provider, &client, &credential).await?;
                 provider
-                    .send(&client, &credential, &model, &messages, Vec::new())
+                    .send(&client, &credential, &model, &prompt, &messages, Vec::new())
                     .await?
             }
             "openai" => {
@@ -168,7 +175,7 @@ mod tests {
                 .await?;
                 let model = selected_live_model(&provider, &client, &credential).await?;
                 provider
-                    .send(&client, &credential, &model, &messages, Vec::new())
+                    .send(&client, &credential, &model, &prompt, &messages, Vec::new())
                     .await?
             }
             "ollama" => {
@@ -182,7 +189,7 @@ mod tests {
                 .await?;
                 let model = selected_live_model(&provider, &client, &credential).await?;
                 provider
-                    .send(&client, &credential, &model, &messages, Vec::new())
+                    .send(&client, &credential, &model, &prompt, &messages, Vec::new())
                     .await?
             }
             other => {

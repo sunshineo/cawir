@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 use crate::{
     Error, Result,
     auth::{ActiveCredential, ApiKeyCredential, AuthOption, CodexOAuthCredential, RequestAuth},
+    prompt::SystemPrompt,
     provider::{Provider, ProviderResponse, ToolDefinition},
     session::{Message, MessageContent},
 };
@@ -17,8 +18,6 @@ const OPENAI_MODELS_URL: &str = "https://api.openai.com/v1/models";
 const CHATGPT_CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 const CHATGPT_CODEX_MODELS_URL: &str =
     "https://chatgpt.com/backend-api/codex/models?client_version=0.0.0";
-const CODEX_INSTRUCTIONS: &str =
-    "You are cawir, a minimal coding agent. Answer plainly and use available tools when needed.";
 const AUTH_OPTIONS: &[AuthOption] = &[
     AuthOption::ApiKey(ApiKeyCredential {
         env_var: "OPENAI_API_KEY",
@@ -256,18 +255,19 @@ impl Provider for OpenAi {
         client: &reqwest::Client,
         credential: &ActiveCredential,
         model: &str,
+        prompt: &SystemPrompt,
         messages: &[Message],
         tools: Vec<ToolDefinition>,
     ) -> Result<ProviderResponse> {
         if credential.option_name() == "codex-oauth" {
             return self
-                .send_codex_oauth(client, credential, model, messages, tools)
+                .send_codex_oauth(client, credential, model, prompt, messages, tools)
                 .await;
         }
 
         let req = ChatRequest {
             model: model.to_string(),
-            messages: to_openai_messages(messages),
+            messages: to_openai_messages(prompt, messages),
             tools: tools.into_iter().map(OpenAiTool::from).collect(),
         };
 
@@ -347,12 +347,13 @@ impl OpenAi {
         client: &reqwest::Client,
         credential: &ActiveCredential,
         model: &str,
+        prompt: &SystemPrompt,
         messages: &[Message],
         tools: Vec<ToolDefinition>,
     ) -> Result<ProviderResponse> {
         let req = ResponsesRequest {
             model: model.to_string(),
-            instructions: CODEX_INSTRUCTIONS.to_string(),
+            instructions: prompt.render_text(),
             input: to_responses_items(messages),
             tools: tools.into_iter().map(ResponsesTool::from).collect(),
             tool_choice: "auto".to_string(),
@@ -424,15 +425,23 @@ impl From<ToolDefinition> for ResponsesTool {
     }
 }
 
-fn to_openai_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
-    messages
-        .iter()
-        .flat_map(|message| match message.role.as_str() {
-            "assistant" => assistant_message(message),
-            "user" => user_messages(message),
-            _ => Vec::new(),
-        })
-        .collect()
+fn to_openai_messages(prompt: &SystemPrompt, messages: &[Message]) -> Vec<OpenAiMessage> {
+    let mut converted = vec![OpenAiMessage::Chat {
+        role: "system".to_string(),
+        content: prompt.render_text(),
+    }];
+
+    converted.extend(
+        messages
+            .iter()
+            .flat_map(|message| match message.role.as_str() {
+                "assistant" => assistant_message(message),
+                "user" => user_messages(message),
+                _ => Vec::new(),
+            }),
+    );
+
+    converted
 }
 
 fn is_chat_completions_model(id: &str) -> bool {
@@ -748,6 +757,7 @@ fn render_text_blocks(blocks: &[MessageContent]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prompt::{PromptSection, SystemPrompt};
 
     #[test]
     fn converts_tool_definition_to_openai_function_tool() {
@@ -799,12 +809,16 @@ mod tests {
             Message::user_tool_result("call_123".to_string(), "contents".to_string()),
         ];
 
-        let messages = to_openai_messages(&history);
+        let messages = to_openai_messages(&test_prompt(), &history);
         let serialized = serde_json::to_value(messages).unwrap();
 
         assert_eq!(
             serialized,
             json!([
+                {
+                    "role": "system",
+                    "content": "<identity>\nYou are cawir.\n</identity>"
+                },
                 {
                     "role": "user",
                     "content": "read Cargo.toml"
@@ -951,7 +965,7 @@ mod tests {
     fn codex_responses_request_includes_required_instructions() {
         let req = ResponsesRequest {
             model: DEFAULT_CODEX_MODEL.to_string(),
-            instructions: CODEX_INSTRUCTIONS.to_string(),
+            instructions: test_prompt().render_text(),
             input: Vec::new(),
             tools: Vec::new(),
             tool_choice: "auto".to_string(),
@@ -963,9 +977,21 @@ mod tests {
 
         let serialized = serde_json::to_value(req).unwrap();
 
-        assert_eq!(serialized["instructions"], CODEX_INSTRUCTIONS);
+        assert_eq!(
+            serialized["instructions"],
+            "<identity>\nYou are cawir.\n</identity>"
+        );
         assert!(!serialized["instructions"].as_str().unwrap().is_empty());
         assert_eq!(serialized["stream"], true);
+    }
+
+    fn test_prompt() -> SystemPrompt {
+        SystemPrompt {
+            sections: vec![PromptSection {
+                name: "identity".to_string(),
+                content: "You are cawir.".to_string(),
+            }],
+        }
     }
 
     #[test]

@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use crate::{
     Error, Result,
     auth::{ActiveCredential, AuthOption},
+    prompt::SystemPrompt,
     provider::{Provider, ProviderResponse, ToolDefinition},
     session::{Message, MessageContent},
 };
@@ -130,12 +131,13 @@ impl Provider for Ollama {
         client: &reqwest::Client,
         credential: &ActiveCredential,
         model: &str,
+        prompt: &SystemPrompt,
         messages: &[Message],
         tools: Vec<ToolDefinition>,
     ) -> Result<ProviderResponse> {
         let req = ChatRequest {
             model: model.to_string(),
-            messages: to_ollama_messages(messages),
+            messages: to_ollama_messages(prompt, messages),
             tools: tools.into_iter().map(OllamaTool::from).collect(),
             stream: false,
             think: true,
@@ -189,9 +191,14 @@ impl From<ToolDefinition> for OllamaTool {
     }
 }
 
-fn to_ollama_messages(messages: &[Message]) -> Vec<OllamaMessage> {
+fn to_ollama_messages(prompt: &SystemPrompt, messages: &[Message]) -> Vec<OllamaMessage> {
     let mut tool_names_by_id = BTreeMap::new();
-    let mut converted = Vec::new();
+    let mut converted = vec![OllamaMessage {
+        role: "system".to_string(),
+        content: prompt.render_text(),
+        tool_calls: Vec::new(),
+        tool_name: None,
+    }];
 
     for message in messages {
         match message.role.as_str() {
@@ -347,6 +354,7 @@ fn render_text_blocks(blocks: &[MessageContent]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prompt::{PromptSection, SystemPrompt};
 
     #[test]
     fn converts_tool_definition_to_ollama_function_tool() {
@@ -395,12 +403,16 @@ mod tests {
             Message::user_tool_result("ollama_tool_0".to_string(), "contents".to_string()),
         ];
 
-        let messages = to_ollama_messages(&history);
+        let messages = to_ollama_messages(&test_prompt(), &history);
         let serialized = serde_json::to_value(messages).unwrap();
 
         assert_eq!(
             serialized,
             json!([
+                {
+                    "role": "system",
+                    "content": "<identity>\nYou are cawir.\n</identity>"
+                },
                 {
                     "role": "user",
                     "content": "read Cargo.toml"
@@ -425,6 +437,15 @@ mod tests {
                 }
             ])
         );
+    }
+
+    fn test_prompt() -> SystemPrompt {
+        SystemPrompt {
+            sections: vec![PromptSection {
+                name: "identity".to_string(),
+                content: "You are cawir.".to_string(),
+            }],
+        }
     }
 
     #[test]

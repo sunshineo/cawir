@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     future::Future,
     io::{self, ErrorKind, Write},
+    path::{Path, PathBuf},
     pin::Pin,
 };
 
@@ -18,6 +19,7 @@ use crate::{
     ollama::Ollama,
     openai::OpenAi,
     policy::PermissionMode,
+    prompt::SystemPrompt,
     provider::Provider,
     session::{
         Message, MessageContent, Session, current_project_path, is_resumable,
@@ -270,23 +272,24 @@ impl Provider for ActiveProvider {
         client: &reqwest::Client,
         credential: &ActiveCredential,
         model: &str,
+        prompt: &SystemPrompt,
         messages: &[Message],
         tools: Vec<crate::provider::ToolDefinition>,
     ) -> Result<crate::provider::ProviderResponse> {
         match self {
             Self::Anthropic(provider) => {
                 provider
-                    .send(client, credential, model, messages, tools)
+                    .send(client, credential, model, prompt, messages, tools)
                     .await
             }
             Self::Ollama(provider) => {
                 provider
-                    .send(client, credential, model, messages, tools)
+                    .send(client, credential, model, prompt, messages, tools)
                     .await
             }
             Self::OpenAi(provider) => {
                 provider
-                    .send(client, credential, model, messages, tools)
+                    .send(client, credential, model, prompt, messages, tools)
                     .await
             }
         }
@@ -391,10 +394,8 @@ pub async fn run() -> Result<()> {
         agent::submit_user_prompt(trimmed, &mut session.messages, &mut render);
 
         if let Err(e) = run_agent_until_complete(
-            &runtime.provider,
-            &runtime.client,
-            &runtime.credential,
-            &runtime.model,
+            &runtime,
+            session_project_path(&session)?,
             &mut session.mode,
             &mut session.messages,
             &mut render,
@@ -599,11 +600,9 @@ fn truncate_for_transcript(value: &str) -> String {
     }
 }
 
-async fn run_agent_until_complete<P: Provider>(
-    provider: &P,
-    client: &reqwest::Client,
-    credential: &ActiveCredential,
-    model: &str,
+async fn run_agent_until_complete(
+    runtime: &Runtime,
+    project_root: PathBuf,
     mode: &mut PermissionMode,
     history: &mut Vec<Message>,
     emit: &mut impl FnMut(AgentEvent),
@@ -615,11 +614,16 @@ async fn run_agent_until_complete<P: Provider>(
             approve: &mut approve_tool,
         };
 
-        match agent::run_turn(
-            provider, client, credential, model, *mode, history, &mut hooks,
-        )
-        .await?
-        {
+        let context = agent::TurnContext {
+            provider: &runtime.provider,
+            client: &runtime.client,
+            credential: &runtime.credential,
+            model: &runtime.model,
+            project_root: &project_root,
+            mode: *mode,
+        };
+
+        match agent::run_turn(context, history, &mut hooks).await? {
             agent::TurnOutcome::Complete => return Ok(()),
             agent::TurnOutcome::PlanReady(plan_ready) => {
                 println!();
@@ -653,6 +657,14 @@ async fn run_agent_until_complete<P: Provider>(
             }
         }
     }
+}
+
+fn session_project_path(session: &Session) -> Result<PathBuf> {
+    if let Some(project_path) = &session.project_path {
+        return Ok(Path::new(project_path).to_path_buf());
+    }
+
+    std::env::current_dir().map_err(Error::Io)
 }
 
 fn render_agent_event(event: AgentEvent) {

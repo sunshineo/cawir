@@ -6,6 +6,7 @@ mod events;
 mod ollama;
 mod openai;
 mod policy;
+mod prompt;
 mod provider;
 mod repl;
 pub mod session;

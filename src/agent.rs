@@ -1,8 +1,11 @@
+use std::path::Path;
+
 use crate::{
     Error, Result,
     auth::ActiveCredential,
     events::{AgentEvent, StopReason},
     policy::PermissionMode,
+    prompt,
     provider::{Provider, ProviderResponse},
     session::{Message, MessageContent},
     tools::{self, PlanReady, ToolApprovalRequest},
@@ -25,6 +28,18 @@ where
     pub(crate) approve: &'a mut A,
 }
 
+pub(crate) struct TurnContext<'a, P>
+where
+    P: Provider,
+{
+    pub(crate) provider: &'a P,
+    pub(crate) client: &'a reqwest::Client,
+    pub(crate) credential: &'a ActiveCredential,
+    pub(crate) model: &'a str,
+    pub(crate) project_root: &'a Path,
+    pub(crate) mode: PermissionMode,
+}
+
 pub(crate) fn submit_user_prompt(
     prompt: &str,
     history: &mut Vec<Message>,
@@ -37,11 +52,7 @@ pub(crate) fn submit_user_prompt(
 }
 
 pub(crate) async fn run_turn<P, E, A>(
-    provider: &P,
-    client: &reqwest::Client,
-    credential: &ActiveCredential,
-    model: &str,
-    mode: PermissionMode,
+    context: TurnContext<'_, P>,
     history: &mut Vec<Message>,
     hooks: &mut TurnHooks<'_, E, A>,
 ) -> Result<TurnOutcome>
@@ -54,12 +65,30 @@ where
 
     loop {
         (hooks.emit)(AgentEvent::ModelRequestStart {
-            provider: provider.name().to_string(),
-            model: model.to_string(),
+            provider: context.provider.name().to_string(),
+            model: context.model.to_string(),
         });
 
-        let response = match provider
-            .send(client, credential, model, history, tools::definitions(mode))
+        let prompt = match prompt::assemble(context.project_root) {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                (hooks.emit)(AgentEvent::StopFailure {
+                    message: error.to_string(),
+                });
+                return Err(error);
+            }
+        };
+
+        let response = match context
+            .provider
+            .send(
+                context.client,
+                context.credential,
+                context.model,
+                &prompt,
+                history,
+                tools::definitions(context.mode),
+            )
             .await
         {
             Ok(response) => response,
@@ -74,13 +103,13 @@ where
         match response {
             ProviderResponse::Text(reply) => {
                 (hooks.emit)(AgentEvent::AssistantText {
-                    provider: provider.name().to_string(),
+                    provider: context.provider.name().to_string(),
                     text: reply.clone(),
                 });
                 history.push(Message::assistant(vec![MessageContent::Text {
                     text: reply.clone(),
                 }]));
-                if mode == PermissionMode::Plan {
+                if context.mode == PermissionMode::Plan {
                     (hooks.emit)(AgentEvent::Stop {
                         reason: StopReason::PlanReady,
                     });
@@ -107,7 +136,7 @@ where
                 for block in &blocks {
                     if let MessageContent::Text { text } = block {
                         (hooks.emit)(AgentEvent::AssistantText {
-                            provider: provider.name().to_string(),
+                            provider: context.provider.name().to_string(),
                             text: text.clone(),
                         });
                     }
@@ -115,12 +144,12 @@ where
 
                 let tool_execution = tools::execute_tool_uses_with_approval(
                     &blocks,
-                    mode,
+                    context.mode,
                     &mut *hooks.emit,
                     &mut *hooks.approve,
                 );
                 if tool_execution.results.is_empty() && tool_execution.plan_ready.is_none() {
-                    let error = Error::EmptyContent(provider.name().to_string());
+                    let error = Error::EmptyContent(context.provider.name().to_string());
                     (hooks.emit)(AgentEvent::StopFailure {
                         message: error.to_string(),
                     });

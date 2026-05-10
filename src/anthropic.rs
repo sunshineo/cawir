@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Error, Result,
     auth::{ActiveCredential, ApiKeyCredential, AuthOption, RequestAuth},
+    prompt::SystemPrompt,
     provider::{Provider, ProviderResponse, ToolDefinition},
     session::{Message, MessageContent},
 };
@@ -24,6 +25,7 @@ struct MessageRequest {
     model: String,
     max_tokens: u32,
     cache_control: CacheControl,
+    system: Vec<AnthropicSystemBlock>,
     messages: Vec<Message>,
     tools: Vec<ToolDefinition>,
 }
@@ -32,6 +34,13 @@ struct MessageRequest {
 struct CacheControl {
     #[serde(rename = "type")]
     kind: String,
+}
+
+#[derive(Serialize)]
+struct AnthropicSystemBlock {
+    #[serde(rename = "type")]
+    kind: String,
+    text: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -96,6 +105,7 @@ impl Provider for Anthropic {
         client: &reqwest::Client,
         credential: &ActiveCredential,
         model: &str,
+        prompt: &SystemPrompt,
         messages: &[Message],
         tools: Vec<ToolDefinition>,
     ) -> Result<ProviderResponse> {
@@ -105,6 +115,7 @@ impl Provider for Anthropic {
             cache_control: CacheControl {
                 kind: "ephemeral".to_string(),
             },
+            system: anthropic_system_blocks(prompt),
             messages: messages.to_vec(),
             tools,
         };
@@ -145,6 +156,13 @@ impl Provider for Anthropic {
     }
 }
 
+fn anthropic_system_blocks(prompt: &SystemPrompt) -> Vec<AnthropicSystemBlock> {
+    vec![AnthropicSystemBlock {
+        kind: "text".to_string(),
+        text: prompt.render_text(),
+    }]
+}
+
 fn render_text_blocks(blocks: &[MessageContent]) -> String {
     blocks
         .iter()
@@ -159,6 +177,7 @@ fn render_text_blocks(blocks: &[MessageContent]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prompt::{PromptSection, SystemPrompt};
     use serde_json::{Value, json};
 
     #[test]
@@ -238,6 +257,7 @@ mod tests {
             cache_control: CacheControl {
                 kind: "ephemeral".to_string(),
             },
+            system: anthropic_system_blocks(&test_prompt()),
             messages: vec![Message::user_text("hello")],
             tools: Vec::new(),
         };
@@ -249,5 +269,51 @@ mod tests {
             Some(&json!({ "type": "ephemeral" }))
         );
         assert_eq!(serialized.get("max_tokens"), Some(&json!(16_384)));
+    }
+
+    #[test]
+    fn message_request_serializes_prompt_as_system_blocks() {
+        let request = MessageRequest {
+            model: "claude-haiku-4-5-20251001".to_string(),
+            max_tokens: MAX_OUTPUT_TOKENS,
+            cache_control: CacheControl {
+                kind: "ephemeral".to_string(),
+            },
+            system: anthropic_system_blocks(&test_prompt()),
+            messages: vec![Message::user_text("hello")],
+            tools: vec![ToolDefinition {
+                name: "read_file".to_string(),
+                description: "Read a file.".to_string(),
+                input_schema: json!({ "type": "object" }),
+            }],
+        };
+
+        let serialized = serde_json::to_value(request).unwrap();
+
+        assert_eq!(
+            serialized["system"],
+            json!([
+                {
+                    "type": "text",
+                    "text": "<identity>\nYou are cawir.\n</identity>\n\n<behavior>\nUse tools when useful.\n</behavior>"
+                }
+            ])
+        );
+        assert_eq!(serialized["tools"][0]["name"], "read_file");
+    }
+
+    fn test_prompt() -> SystemPrompt {
+        SystemPrompt {
+            sections: vec![
+                PromptSection {
+                    name: "identity".to_string(),
+                    content: "You are cawir.".to_string(),
+                },
+                PromptSection {
+                    name: "behavior".to_string(),
+                    content: "Use tools when useful.".to_string(),
+                },
+            ],
+        }
     }
 }
