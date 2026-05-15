@@ -8,7 +8,7 @@ use crate::{
     prompt,
     provider::{Provider, ProviderResponse},
     session::{Message, MessageContent},
-    tools::{self, PlanReady, ToolApprovalRequest},
+    tools::{self, PlanReady, ToolApprovalRequest, ToolRegistry},
 };
 
 const MAX_TOOL_ROUNDS: usize = 42;
@@ -38,6 +38,7 @@ where
     pub(crate) model: &'a str,
     pub(crate) project_root: &'a Path,
     pub(crate) mode: PermissionMode,
+    pub(crate) tool_registry: &'a ToolRegistry,
 }
 
 pub(crate) fn submit_user_prompt(
@@ -87,7 +88,7 @@ where
                 context.model,
                 &prompt,
                 history,
-                tools::definitions(context.mode),
+                context.tool_registry.definitions(context.mode),
             )
             .await
         {
@@ -143,6 +144,7 @@ where
                 }
 
                 let tool_execution = tools::execute_tool_uses_with_approval(
+                    context.tool_registry,
                     &blocks,
                     context.mode,
                     &mut *hooks.emit,

@@ -45,12 +45,12 @@ trait Tool {
     }
 }
 
-struct ToolRegistry {
+pub(crate) struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
 }
 
 impl ToolRegistry {
-    fn builtins() -> Self {
+    pub(crate) fn builtins() -> Self {
         Self {
             tools: vec![
                 Box::new(ListFilesTool),
@@ -63,7 +63,7 @@ impl ToolRegistry {
         }
     }
 
-    fn definitions(&self, mode: PermissionMode) -> Vec<ToolDefinition> {
+    pub(crate) fn definitions(&self, mode: PermissionMode) -> Vec<ToolDefinition> {
         self.tools
             .iter()
             .filter(|tool| tool.is_available(mode))
@@ -202,10 +202,6 @@ pub(crate) struct PlanReady {
 pub(crate) struct ToolExecution {
     pub(crate) results: Vec<ToolResult>,
     pub(crate) plan_ready: Option<PlanReady>,
-}
-
-pub(crate) fn definitions(mode: PermissionMode) -> Vec<ToolDefinition> {
-    ToolRegistry::builtins().definitions(mode)
 }
 
 struct ReadFileTool;
@@ -579,6 +575,7 @@ impl Tool for ExitPlanModeTool {
 
 #[cfg(test)]
 pub(crate) fn execute_tool_uses<F>(
+    registry: &ToolRegistry,
     blocks: &[MessageContent],
     mode: PermissionMode,
     emit: F,
@@ -586,10 +583,11 @@ pub(crate) fn execute_tool_uses<F>(
 where
     F: FnMut(AgentEvent),
 {
-    execute_tool_uses_with_approval(blocks, mode, emit, |_| Ok(true))
+    execute_tool_uses_with_approval(registry, blocks, mode, emit, |_| Ok(true))
 }
 
 pub(crate) fn execute_tool_uses_with_approval<F, A>(
+    registry: &ToolRegistry,
     blocks: &[MessageContent],
     mode: PermissionMode,
     mut emit: F,
@@ -599,7 +597,6 @@ where
     F: FnMut(AgentEvent),
     A: FnMut(&ToolApprovalRequest) -> Result<bool>,
 {
-    let registry = ToolRegistry::builtins();
     let mut results = Vec::new();
     let mut plan_ready = None;
 
@@ -1165,6 +1162,7 @@ mod tests {
     #[test]
     fn tool_execution_returns_results_for_all_tool_uses() {
         let path = project_test_path("multi-tool");
+        let registry = ToolRegistry::builtins();
 
         std::fs::create_dir(&path).unwrap();
         std::fs::write(path.join("first.txt"), "first result").unwrap();
@@ -1185,7 +1183,7 @@ mod tests {
             },
         ];
 
-        let execution = execute_tool_uses(&blocks, PermissionMode::Default, |_| {});
+        let execution = execute_tool_uses(&registry, &blocks, PermissionMode::Default, |_| {});
 
         assert_eq!(
             execution.results,
@@ -1209,13 +1207,14 @@ mod tests {
 
     #[test]
     fn tool_execution_turns_failures_into_error_results() {
+        let registry = ToolRegistry::builtins();
         let blocks = vec![MessageContent::ToolUse {
             id: "toolu_missing_path".to_string(),
             name: "read_file".to_string(),
             input: json!({}),
         }];
 
-        let execution = execute_tool_uses(&blocks, PermissionMode::Default, |_| {});
+        let execution = execute_tool_uses(&registry, &blocks, PermissionMode::Default, |_| {});
 
         assert_eq!(
             execution.results,
@@ -1231,6 +1230,7 @@ mod tests {
     #[test]
     fn tool_execution_emits_progress_events_separate_from_results() {
         let path = project_test_path("tool-event.txt");
+        let registry = ToolRegistry::builtins();
         std::fs::write(&path, "event result").unwrap();
 
         let input = json!({ "path": path.to_string_lossy() });
@@ -1241,7 +1241,7 @@ mod tests {
         }];
         let mut events = Vec::new();
 
-        let execution = execute_tool_uses(&blocks, PermissionMode::Default, |event| {
+        let execution = execute_tool_uses(&registry, &blocks, PermissionMode::Default, |event| {
             events.push(event);
         });
 
@@ -1276,33 +1276,57 @@ mod tests {
 
     #[test]
     fn plan_mode_advertises_exit_plan_mode() {
-        let tool_names = definitions(PermissionMode::Plan)
+        let registry = ToolRegistry::builtins();
+        let tool_names = registry
+            .definitions(PermissionMode::Plan)
             .into_iter()
             .map(|tool| tool.name)
             .collect::<Vec<_>>();
 
-        assert!(tool_names.contains(&"exit_plan_mode".to_string()));
+        assert_eq!(
+            tool_names,
+            vec![
+                "list_files",
+                "read_file",
+                "write_file",
+                "edit_file",
+                "shell",
+                "exit_plan_mode",
+            ]
+        );
     }
 
     #[test]
-    fn default_mode_does_not_advertise_exit_plan_mode() {
-        let tool_names = definitions(PermissionMode::Default)
+    fn default_mode_advertises_builtins_in_deterministic_order() {
+        let registry = ToolRegistry::builtins();
+        let tool_names = registry
+            .definitions(PermissionMode::Default)
             .into_iter()
             .map(|tool| tool.name)
             .collect::<Vec<_>>();
 
-        assert!(!tool_names.contains(&"exit_plan_mode".to_string()));
+        assert_eq!(
+            tool_names,
+            vec![
+                "list_files",
+                "read_file",
+                "write_file",
+                "edit_file",
+                "shell"
+            ]
+        );
     }
 
     #[test]
     fn exit_plan_mode_returns_plan_ready_instead_of_tool_result() {
+        let registry = ToolRegistry::builtins();
         let blocks = vec![MessageContent::ToolUse {
             id: "toolu_plan".to_string(),
             name: "exit_plan_mode".to_string(),
             input: json!({ "plan": "1. Inspect\n2. Edit\n3. Test" }),
         }];
 
-        let execution = execute_tool_uses(&blocks, PermissionMode::Plan, |_| {});
+        let execution = execute_tool_uses(&registry, &blocks, PermissionMode::Plan, |_| {});
 
         assert_eq!(execution.results, Vec::new());
         assert_eq!(

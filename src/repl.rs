@@ -25,7 +25,7 @@ use crate::{
         Message, MessageContent, Session, current_project_path, is_resumable,
         list_resumable_project_sessions, load_most_recent_session, load_session, save_session,
     },
-    tools::ToolApprovalRequest,
+    tools::{ToolApprovalRequest, ToolRegistry},
 };
 
 #[derive(Debug, Parser)]
@@ -101,6 +101,7 @@ struct Runtime {
     model_preferences: BTreeMap<String, String>,
     client: reqwest::Client,
     command_registry: CommandRegistry,
+    tool_registry: ToolRegistry,
 }
 
 struct ExitCommand;
@@ -329,6 +330,7 @@ pub async fn run() -> Result<()> {
         model_preferences,
         client,
         command_registry: CommandRegistry::builtins(),
+        tool_registry: ToolRegistry::builtins(),
     };
     let mut session = resumed_session.unwrap_or_else(|| {
         Session::new(
@@ -621,6 +623,7 @@ async fn run_agent_until_complete(
             model: &runtime.model,
             project_root: &project_root,
             mode: *mode,
+            tool_registry: &runtime.tool_registry,
         };
 
         match agent::run_turn(context, history, &mut hooks).await? {
