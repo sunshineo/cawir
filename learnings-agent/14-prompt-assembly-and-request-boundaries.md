@@ -33,8 +33,14 @@ Tool schemas should travel through provider-native structured tool fields, not b
 
 This also matters for caching. Anthropic includes structured tools in the cached prefix, so tool definitions and ordering still affect cache hits. The answer is not to inline tools into prompt text; the answer is to keep tool definitions deterministic and make cache behavior observable.
 
-## Cache policy waits for the provider audit
+## Cache policy after the Anthropic audit
 
-8.5d creates the prompt assembly layer, but it deliberately does not add block-level Anthropic cache breakpoints.
+8.5d created the prompt assembly layer without adding block-level Anthropic cache breakpoints. That was deliberate: cache markers are provider-specific policy, and the request shape needed to be checked against Anthropic's current docs before cawir encoded a strategy.
 
-Explicit cache markers are provider-specific policy. They require deciding which exact request blocks are stable, how tool schemas interact with the cached prefix, and whether top-level automatic caching is enough for cawir's agent loop. That belongs in 8.5h, the Anthropic prompt-cache request audit.
+8.5h made the policy concrete for Anthropic:
+
+- Keep top-level automatic `cache_control` so the cache breakpoint moves forward with the growing conversation.
+- Also put an explicit `cache_control` breakpoint on cawir's single system text block. Because Anthropic cache prefixes are ordered `tools` → `system` → `messages`, that system breakpoint covers stable tool definitions plus the assembled identity/behavior/environment/project-guidance prompt.
+- Do not add thinking-clearing headers or mutate prior reasoning/context as a cache optimization. Anthropic's April 2026 Claude Code postmortem showed how a repeated `clear_thinking_20251015` request flag caused degraded behavior and cache misses.
+
+The resulting request has two cache layers: a stable project/tool/system prefix, and an automatic conversation prefix. This is slightly more explicit than automatic-only caching, but it keeps the provider-specific choice isolated inside `anthropic.rs`.

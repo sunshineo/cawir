@@ -44,6 +44,8 @@ struct AnthropicSystemBlock {
     #[serde(rename = "type")]
     kind: String,
     text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -183,6 +185,9 @@ fn anthropic_system_blocks(prompt: &SystemPrompt) -> Vec<AnthropicSystemBlock> {
     vec![AnthropicSystemBlock {
         kind: "text".to_string(),
         text: prompt.render_text(),
+        cache_control: Some(CacheControl {
+            kind: "ephemeral".to_string(),
+        }),
     }]
 }
 
@@ -330,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn message_request_serializes_prompt_as_system_blocks() {
+    fn message_request_combines_system_and_automatic_cache_breakpoints() {
         let request = MessageRequest {
             model: "claude-haiku-4-5-20251001".to_string(),
             max_tokens: MAX_OUTPUT_TOKENS,
@@ -349,15 +354,38 @@ mod tests {
         let serialized = serde_json::to_value(request).unwrap();
 
         assert_eq!(
-            serialized["system"],
-            json!([
+            serialized,
+            json!({
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 16_384,
+                "cache_control": { "type": "ephemeral" },
+                "system": [
                 {
                     "type": "text",
-                    "text": "<identity>\nYou are cawir.\n</identity>\n\n<behavior>\nUse tools when useful.\n</behavior>"
+                        "text": "<identity>\nYou are cawir.\n</identity>\n\n<behavior>\nUse tools when useful.\n</behavior>",
+                        "cache_control": { "type": "ephemeral" }
                 }
-            ])
+                ],
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "hello"
+                            }
+                        ]
+                    }
+                ],
+                "tools": [
+                    {
+                        "name": "read_file",
+                        "description": "Read a file.",
+                        "input_schema": { "type": "object" }
+                    }
+                ]
+            })
         );
-        assert_eq!(serialized["tools"][0]["name"], "read_file");
     }
 
     fn test_prompt() -> SystemPrompt {

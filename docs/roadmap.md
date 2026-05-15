@@ -295,6 +295,8 @@ Sub-steps:
 - **8.5g — Event boundary hardening**. Expand events enough for hooks and alternate surfaces: session start/end, pre-tool and post-tool events, model request finish, and structured stop/failure metadata. Decide whether the current callback stays for now or becomes a lightweight stream-like adapter. Keep `tool_result` blocks as session data, not display events. *Rust:* serializable event enums, producer/consumer boundaries, callback vs stream tradeoffs.
 - **8.5h — Anthropic prompt-cache request audit**. Verify the current Anthropic `cache_control` request shape against Anthropic's documented automatic and block-level prompt caching formats. Confirm whether top-level automatic caching is sufficient for cawir's agent loop, or whether explicit breakpoints should mark stable tools/system/project-memory separately from growing conversation history. Audit against the Claude Code April 2026 postmortem failure mode: cawir should not send thinking-clearing headers or otherwise mutate prior reasoning/context in a way that causes repeated cache misses. *Rust:* provider-specific serde structs, `skip_serializing_if`, tests that assert the exact wire JSON.
 
+Prompt-cache follow-up: 8.5h leaves cawir with one explicit Anthropic breakpoint on the assembled system prompt plus top-level automatic caching for the growing conversation. Do not add more explicit breakpoints just because Anthropic supports them. Add another breakpoint only when a later checkpoint introduces a request layer with a different stability profile, such as compaction summaries, memory extraction, subagent handoffs, dynamic MCP/plugin/skill context, or large generated tool surfaces. That future step should name the stable layer, update the provider-neutral request shape if needed, and assert the exact Anthropic wire JSON.
+
 Done when: tools enforce project boundaries, large outputs and long processes are bounded, routine edits can happen without whole-file rewrites, prompt assembly has a real module with stable cacheable sections, runtime owns registries with deterministic tool definitions, provider errors/usage are more observable, events are ready for hooks, and Anthropic cache behavior is both correct and visible.
 
 Components: Core engine, Capabilities, Policy, External, Surface.
@@ -423,6 +425,6 @@ Components: Surface.
 
 ## Beyond Checkpoint 14 (speculative)
 
-Subagents · auto-mode classifier · context compaction · memory extraction · richer TUI polish · remote daemon deployment.
+Subagents · auto-mode classifier · context compaction · memory extraction · cache-breakpoint strategy expansion for new context layers · richer TUI polish · remote daemon deployment.
 
 Each has a seam in [`architecture.md`](architecture.md). The principle is the same for all of them: extend the relevant component boundary only after concrete pressure exists.
