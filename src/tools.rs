@@ -604,14 +604,14 @@ where
         match block {
             MessageContent::Text { .. } => {}
             MessageContent::ToolUse { id, name, input } => {
-                emit(AgentEvent::ToolUseRequested {
+                emit(AgentEvent::PreToolUse {
                     id: id.clone(),
                     name: name.clone(),
                     input: input.clone(),
                 });
                 match registry.execute(name, input, mode, &mut approve) {
                     Ok(ToolOutput::Result(content)) => {
-                        emit(AgentEvent::ToolUseFinished {
+                        emit(AgentEvent::PostToolUse {
                             id: id.clone(),
                             name: name.clone(),
                             output_len: content.len(),
@@ -625,7 +625,7 @@ where
                         });
                     }
                     Ok(ToolOutput::PlanReady(plan)) => {
-                        emit(AgentEvent::ToolUseFinished {
+                        emit(AgentEvent::PostToolUse {
                             id: id.clone(),
                             name: name.clone(),
                             output_len: plan.len(),
@@ -639,7 +639,7 @@ where
                     }
                     Err(error) => {
                         let content = error.to_string();
-                        emit(AgentEvent::ToolUseFinished {
+                        emit(AgentEvent::PostToolUse {
                             id: id.clone(),
                             name: name.clone(),
                             output_len: content.len(),
@@ -1248,12 +1248,12 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                AgentEvent::ToolUseRequested {
+                AgentEvent::PreToolUse {
                     id: "toolu_event".to_string(),
                     name: "read_file".to_string(),
                     input,
                 },
-                AgentEvent::ToolUseFinished {
+                AgentEvent::PostToolUse {
                     id: "toolu_event".to_string(),
                     name: "read_file".to_string(),
                     output_len: "event result".len(),

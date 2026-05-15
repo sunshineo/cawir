@@ -342,6 +342,15 @@ pub async fn run() -> Result<()> {
     sync_session_from_runtime(&mut session, &runtime);
     save_session_if_needed(&mut session, is_resuming)?;
 
+    let mut render = render_agent_event;
+    render(AgentEvent::SessionStart {
+        session_id: session.id.clone(),
+        provider: runtime.provider.name().to_string(),
+        model: runtime.model.clone(),
+        mode: session.mode,
+        project_path: session_project_path(&session)?.display().to_string(),
+    });
+
     print_active_provider(&runtime.provider, &runtime.credential, &runtime.model);
     println!("session: {}", session.id);
     println!("mode: {}", session.mode.name());
@@ -392,7 +401,6 @@ pub async fn run() -> Result<()> {
         }
 
         let history_len_before_turn = session.messages.len();
-        let mut render = render_agent_event;
         agent::submit_user_prompt(trimmed, &mut session.messages, &mut render);
 
         if let Err(e) = run_agent_until_complete(
@@ -410,6 +418,10 @@ pub async fn run() -> Result<()> {
         sync_session_from_runtime(&mut session, &runtime);
         save_session_if_needed(&mut session, is_resuming)?;
     }
+
+    render(AgentEvent::SessionEnd {
+        session_id: session.id.clone(),
+    });
 
     Ok(())
 }
@@ -672,6 +684,7 @@ fn session_project_path(session: &Session) -> Result<PathBuf> {
 
 fn render_agent_event(event: AgentEvent) {
     match event {
+        AgentEvent::SessionStart { .. } | AgentEvent::SessionEnd { .. } => {}
         AgentEvent::UserPromptSubmit { prompt } => {
             let _ = prompt;
         }
@@ -687,11 +700,11 @@ fn render_agent_event(event: AgentEvent) {
                 println!("model usage from {provider}/{model}: {usage}");
             }
         }
-        AgentEvent::ToolUseRequested { id, name, input } => {
+        AgentEvent::PreToolUse { id, name, input } => {
             let _ = input;
             println!("tool request: {} ({})", name, id);
         }
-        AgentEvent::ToolUseFinished {
+        AgentEvent::PostToolUse {
             name,
             output_len,
             is_error,
@@ -716,7 +729,7 @@ fn render_agent_event(event: AgentEvent) {
         AgentEvent::Stop { reason } => {
             let _ = reason;
         }
-        AgentEvent::StopFailure { message } => {
+        AgentEvent::StopFailure { message, .. } => {
             let _ = message;
         }
     }

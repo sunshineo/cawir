@@ -97,3 +97,25 @@ fn render_agent_event(event: AgentEvent) {
 
 It does not mutate captured state because it captures nothing. Since it satisfies the stricter `Fn` behavior, it can also be used where `FnMut` is accepted.
 
+## Why not a stream yet
+
+Checkpoint 8.5g kept the event boundary as a callback instead of changing it to an async stream.
+
+That is an intentional Rust design choice. A callback has a very small contract:
+
+```rust
+emit(event);
+```
+
+The event is handled immediately by the caller-provided consumer. The terminal REPL can render it, and tests can push it into a `Vec`.
+
+An async stream would introduce more design questions:
+
+- who owns the stream producer?
+- is there buffering?
+- what happens if the consumer is slow?
+- how does shutdown work?
+- do event payloads need to be `Send`?
+- can multiple consumers subscribe?
+
+Those questions are real, but cawir only has one surface today: the REPL. `FnMut(AgentEvent)` is enough until a second surface, hook runner, or daemon mode creates pressure for a stream abstraction.

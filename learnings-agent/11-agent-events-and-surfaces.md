@@ -16,8 +16,8 @@ Now the core loop emits structured `AgentEvent` values, and the REPL decides how
 `AgentEvent` is for observers:
 
 ```rust
-AgentEvent::ToolUseRequested { id, name, input }
-AgentEvent::ToolUseFinished { id, name, output_len, is_error, error }
+AgentEvent::PreToolUse { id, name, input }
+AgentEvent::PostToolUse { id, name, output_len, is_error, error }
 AgentEvent::AssistantText { provider, text }
 ```
 
@@ -52,13 +52,16 @@ The current event vocabulary is small and owned by cawir:
 
 ```rust
 pub(crate) enum AgentEvent {
+    SessionStart { session_id: String, ... },
     UserPromptSubmit { prompt: String },
     ModelRequestStart { provider: String, model: String },
-    ToolUseRequested { id: String, name: String, input: Value },
-    ToolUseFinished { ... },
+    ModelRequestFinish { provider: String, model: String, metadata: ProviderMetadata },
+    PreToolUse { id: String, name: String, input: Value },
+    PostToolUse { ... },
     AssistantText { ... },
     Stop { reason: StopReason },
-    StopFailure { message: String },
+    StopFailure { kind: FailureKind, message: String, retryable: bool },
+    SessionEnd { session_id: String },
 }
 ```
 
@@ -91,7 +94,7 @@ The REPL is one consumer:
 ```rust
 fn render_agent_event(event: AgentEvent) {
     match event {
-        AgentEvent::ToolUseRequested { id, name, .. } => {
+        AgentEvent::PreToolUse { id, name, .. } => {
             println!("tool request: {name} ({id})");
         }
         AgentEvent::AssistantText { provider, text } => {
@@ -105,6 +108,16 @@ fn render_agent_event(event: AgentEvent) {
 Tests can be another consumer by collecting events into a vector.
 
 This is not a thread boundary. It is normal function calling. The callback runs immediately when `agent.rs` emits the event.
+
+## Pre-tool means the raw requested boundary
+
+Checkpoint 8.5g renamed the tool events from `ToolUseRequested` / `ToolUseFinished` to `PreToolUse` / `PostToolUse`.
+
+`PreToolUse` currently fires before `registry.execute(...)`. That means it describes the raw model-requested tool call before cawir has prepared input, applied permission policy, asked for approval, or executed the tool.
+
+This is the earliest useful hook point. A future hook may want to reject a tool call before any local behavior happens. Later, if hooks need the canonical prepared form too, cawir can add a second event point after preparation and policy validation. That pressure does not exist yet.
+
+`PostToolUse` summarizes what happened after execution: output length, error flag, and optional error string. The full tool output still belongs in `MessageContent::ToolResult`, not in the event.
 
 ## Why the REPL renders
 
@@ -130,17 +143,38 @@ handle slash commands
 
 Keeping rendering out of `agent.rs` makes the core loop easier to reuse. A future TUI, JSON command surface, or hook runner can consume the same events without changing model/tool orchestration.
 
-## Serialization should wait for hooks
+## Serialization is now an event contract
 
-Checkpoint 8 keeps `AgentEvent` as internal Rust data. Checkpoint 9 hooks will likely need event JSON, so `AgentEvent` will probably derive `Serialize` then:
+Checkpoint 8 kept `AgentEvent` as internal Rust data. Checkpoint 8.5g moved it closer to an external contract:
 
 ```rust
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AgentEvent {
     // ...
 }
 ```
 
-That should happen when the hook contract is designed, because serialized event names and fields become an external API.
+This serializes each event with a stable `type` field:
 
+```json
+{ "type": "pre_tool_use", "id": "toolu_123", "name": "read_file", "input": { "path": "src/main.rs" } }
+```
+
+That shape is easy for hooks, logs, JSON output, a TUI, or a WebSocket surface to consume. The cost is that event names and fields become harder to rename casually. Once external consumers match on `pre_tool_use`, changing that string is an API break.
+
+## Structured failures serve machines and humans
+
+Checkpoint 8 had `StopFailure { message: String }`. That was readable, but future hooks or alternate surfaces would have had to parse a human string to answer basic questions.
+
+Checkpoint 8.5g changed failures to:
+
+```rust
+StopFailure {
+    kind: FailureKind,
+    message: String,
+    retryable: bool,
+}
+```
+
+`message` stays because people need context. `kind` and `retryable` exist so code can branch without scraping prose. For example, a future surface can render provider failures differently from tool-loop-limit failures, and a future retry policy can look at `retryable`.

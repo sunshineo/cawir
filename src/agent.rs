@@ -3,7 +3,7 @@ use std::path::Path;
 use crate::{
     Error, Result,
     auth::ActiveCredential,
-    events::{AgentEvent, StopReason},
+    events::{AgentEvent, FailureKind, StopReason},
     policy::PermissionMode,
     prompt,
     provider::{Provider, ProviderResponse},
@@ -73,9 +73,10 @@ where
         let prompt = match prompt::assemble(context.project_root) {
             Ok(prompt) => prompt,
             Err(error) => {
-                (hooks.emit)(AgentEvent::StopFailure {
-                    message: error.to_string(),
-                });
+                (hooks.emit)(AgentEvent::stop_failure(
+                    FailureKind::PromptAssembly,
+                    &error,
+                ));
                 return Err(error);
             }
         };
@@ -94,9 +95,10 @@ where
         {
             Ok(response) => response,
             Err(error) => {
-                (hooks.emit)(AgentEvent::StopFailure {
-                    message: error.to_string(),
-                });
+                (hooks.emit)(AgentEvent::stop_failure(
+                    FailureKind::ProviderRequest,
+                    &error,
+                ));
                 return Err(error);
             }
         };
@@ -134,9 +136,7 @@ where
                 tool_rounds += 1;
                 if tool_rounds > MAX_TOOL_ROUNDS {
                     let error = Error::ToolLoopLimitExceeded(MAX_TOOL_ROUNDS);
-                    (hooks.emit)(AgentEvent::StopFailure {
-                        message: error.to_string(),
-                    });
+                    (hooks.emit)(AgentEvent::stop_failure(FailureKind::ToolLoopLimit, &error));
                     return Err(error);
                 }
 
@@ -158,9 +158,7 @@ where
                 );
                 if tool_execution.results.is_empty() && tool_execution.plan_ready.is_none() {
                     let error = Error::EmptyContent(context.provider.name().to_string());
-                    (hooks.emit)(AgentEvent::StopFailure {
-                        message: error.to_string(),
-                    });
+                    (hooks.emit)(AgentEvent::stop_failure(FailureKind::EmptyContent, &error));
                     return Err(error);
                 }
 

@@ -2,7 +2,7 @@ use reqwest::{
     StatusCode,
     header::{HeaderMap, RETRY_AFTER},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     Error, Result,
@@ -19,12 +19,12 @@ pub(crate) struct ToolDefinition {
     pub(crate) input_schema: serde_json::Value,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 pub(crate) struct ProviderMetadata {
     pub(crate) usage: Option<TokenUsage>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 pub(crate) struct TokenUsage {
     pub(crate) input_tokens: Option<u64>,
     pub(crate) output_tokens: Option<u64>,
