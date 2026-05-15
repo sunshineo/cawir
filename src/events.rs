@@ -1,5 +1,7 @@
 use serde_json::Value;
 
+use crate::provider::ProviderMetadata;
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum StopReason {
     Complete,
@@ -14,6 +16,11 @@ pub(crate) enum AgentEvent {
     ModelRequestStart {
         provider: String,
         model: String,
+    },
+    ModelRequestFinish {
+        provider: String,
+        model: String,
+        metadata: ProviderMetadata,
     },
     ToolUseRequested {
         id: String,

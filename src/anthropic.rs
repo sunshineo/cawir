@@ -4,7 +4,10 @@ use crate::{
     Error, Result,
     auth::{ActiveCredential, ApiKeyCredential, AuthOption, RequestAuth},
     prompt::SystemPrompt,
-    provider::{Provider, ProviderResponse, ToolDefinition},
+    provider::{
+        Provider, ProviderMetadata, ProviderResponse, TokenUsage, ToolDefinition,
+        api_error_from_response,
+    },
     session::{Message, MessageContent},
 };
 
@@ -46,6 +49,15 @@ struct AnthropicSystemBlock {
 #[derive(Deserialize, Debug)]
 struct MessageResponse {
     content: Vec<MessageContent>,
+    usage: Option<AnthropicUsage>,
+}
+
+#[derive(Deserialize, Debug)]
+struct AnthropicUsage {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_creation_input_tokens: Option<u64>,
+    cache_read_input_tokens: Option<u64>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -82,14 +94,8 @@ impl Provider for Anthropic {
             .send()
             .await?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await?;
-            return Err(Error::Api {
-                provider: self.name().to_string(),
-                status,
-                body,
-            });
+        if !response.status().is_success() {
+            return Err(api_error_from_response(self.name(), response).await);
         }
 
         let parsed: ModelsResponse = response.json().await?;
@@ -128,23 +134,18 @@ impl Provider for Anthropic {
             .send()
             .await?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await?;
-            return Err(Error::Api {
-                provider: self.name().to_string(),
-                status,
-                body,
-            });
+        if !response.status().is_success() {
+            return Err(api_error_from_response(self.name(), response).await);
         }
 
         let parsed: MessageResponse = response.json().await?;
+        let metadata = parsed.metadata();
         if parsed
             .content
             .iter()
             .any(|block| matches!(block, MessageContent::ToolUse { .. }))
         {
-            return Ok(ProviderResponse::ToolUse(parsed.content));
+            return Ok(ProviderResponse::tool_use(parsed.content, metadata));
         }
 
         let reply = render_text_blocks(&parsed.content);
@@ -152,7 +153,29 @@ impl Provider for Anthropic {
             return Err(Error::EmptyContent(self.name().to_string()));
         }
 
-        Ok(ProviderResponse::Text(reply))
+        Ok(ProviderResponse::text(reply, metadata))
+    }
+}
+
+impl MessageResponse {
+    fn metadata(&self) -> ProviderMetadata {
+        ProviderMetadata::from_usage(
+            self.usage
+                .as_ref()
+                .map(AnthropicUsage::token_usage)
+                .unwrap_or_default(),
+        )
+    }
+}
+
+impl AnthropicUsage {
+    fn token_usage(&self) -> TokenUsage {
+        TokenUsage {
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            cache_creation_input_tokens: self.cache_creation_input_tokens,
+            cache_read_input_tokens: self.cache_read_input_tokens,
+        }
     }
 }
 
@@ -178,6 +201,7 @@ fn render_text_blocks(blocks: &[MessageContent]) -> String {
 mod tests {
     use super::*;
     use crate::prompt::{PromptSection, SystemPrompt};
+    use crate::provider::{ProviderMetadata, TokenUsage};
     use serde_json::{Value, json};
 
     #[test]
@@ -217,6 +241,40 @@ mod tests {
             }
             other => panic!("expected tool_use block, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn parses_usage_and_cache_counts_from_anthropic_response() {
+        let body = r#"
+        {
+            "content": [
+                {
+                    "type": "text",
+                    "text": "done"
+                }
+            ],
+            "usage": {
+                "input_tokens": 123,
+                "output_tokens": 45,
+                "cache_creation_input_tokens": 67,
+                "cache_read_input_tokens": 89
+            }
+        }
+        "#;
+
+        let parsed: MessageResponse = serde_json::from_str(body).unwrap();
+
+        assert_eq!(
+            parsed.metadata(),
+            ProviderMetadata {
+                usage: Some(TokenUsage {
+                    input_tokens: Some(123),
+                    output_tokens: Some(45),
+                    cache_creation_input_tokens: Some(67),
+                    cache_read_input_tokens: Some(89),
+                })
+            }
+        );
     }
 
     #[test]

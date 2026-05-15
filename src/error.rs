@@ -1,4 +1,22 @@
+use std::fmt;
+
 use thiserror::Error;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RetryAfter {
+    pub raw: Option<String>,
+    pub seconds: Option<u64>,
+}
+
+impl fmt::Display for RetryAfter {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (self.seconds, self.raw.as_deref()) {
+            (Some(seconds), _) => write!(formatter, "{seconds}s"),
+            (None, Some(raw)) => formatter.write_str(raw),
+            (None, None) => formatter.write_str("unknown"),
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -15,6 +33,14 @@ pub enum Error {
     Api {
         provider: String,
         status: reqwest::StatusCode,
+        body: String,
+    },
+
+    #[error("{provider} rate limited {status}; retry after {retry_after}: {body}")]
+    RateLimited {
+        provider: String,
+        status: reqwest::StatusCode,
+        retry_after: RetryAfter,
         body: String,
     },
 

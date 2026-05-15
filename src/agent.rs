@@ -100,9 +100,15 @@ where
                 return Err(error);
             }
         };
+        let metadata = response.metadata().clone();
+        (hooks.emit)(AgentEvent::ModelRequestFinish {
+            provider: context.provider.name().to_string(),
+            model: context.model.to_string(),
+            metadata,
+        });
 
         match response {
-            ProviderResponse::Text(reply) => {
+            ProviderResponse::Text { text: reply, .. } => {
                 (hooks.emit)(AgentEvent::AssistantText {
                     provider: context.provider.name().to_string(),
                     text: reply.clone(),
@@ -124,7 +130,7 @@ where
                 });
                 return Ok(TurnOutcome::Complete);
             }
-            ProviderResponse::ToolUse(blocks) => {
+            ProviderResponse::ToolUse { blocks, .. } => {
                 tool_rounds += 1;
                 if tool_rounds > MAX_TOOL_ROUNDS {
                     let error = Error::ToolLoopLimitExceeded(MAX_TOOL_ROUNDS);

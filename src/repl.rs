@@ -20,7 +20,7 @@ use crate::{
     openai::OpenAi,
     policy::PermissionMode,
     prompt::SystemPrompt,
-    provider::Provider,
+    provider::{Provider, ProviderMetadata},
     session::{
         Message, MessageContent, Session, current_project_path, is_resumable,
         list_resumable_project_sessions, load_most_recent_session, load_session, save_session,
@@ -678,6 +678,15 @@ fn render_agent_event(event: AgentEvent) {
         AgentEvent::ModelRequestStart { provider, model } => {
             let _ = (provider, model);
         }
+        AgentEvent::ModelRequestFinish {
+            provider,
+            model,
+            metadata,
+        } => {
+            if let Some(usage) = render_provider_metadata(&metadata) {
+                println!("model usage from {provider}/{model}: {usage}");
+            }
+        }
         AgentEvent::ToolUseRequested { id, name, input } => {
             let _ = input;
             println!("tool request: {} ({})", name, id);
@@ -711,6 +720,30 @@ fn render_agent_event(event: AgentEvent) {
             let _ = message;
         }
     }
+}
+
+fn render_provider_metadata(metadata: &ProviderMetadata) -> Option<String> {
+    if metadata.is_empty() {
+        return None;
+    }
+
+    let usage = metadata.usage.as_ref()?;
+    let mut parts = Vec::new();
+
+    if let Some(tokens) = usage.input_tokens {
+        parts.push(format!("input={tokens}"));
+    }
+    if let Some(tokens) = usage.output_tokens {
+        parts.push(format!("output={tokens}"));
+    }
+    if let Some(tokens) = usage.cache_creation_input_tokens {
+        parts.push(format!("cache_create={tokens}"));
+    }
+    if let Some(tokens) = usage.cache_read_input_tokens {
+        parts.push(format!("cache_read={tokens}"));
+    }
+
+    (!parts.is_empty()).then(|| parts.join(", "))
 }
 
 fn approve_plan_interactively() -> Result<bool> {
@@ -1188,6 +1221,7 @@ fn resume_usage() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::TokenUsage;
     use crate::session::is_resumable;
     use serde_json::json;
 
@@ -1255,6 +1289,23 @@ mod tests {
 
         assert_eq!(rendered.len(), 243);
         assert!(rendered.ends_with("..."));
+    }
+
+    #[test]
+    fn provider_metadata_renders_token_usage_and_cache_counts() {
+        let rendered = render_provider_metadata(&ProviderMetadata {
+            usage: Some(TokenUsage {
+                input_tokens: Some(100),
+                output_tokens: Some(20),
+                cache_creation_input_tokens: Some(30),
+                cache_read_input_tokens: Some(40),
+            }),
+        });
+
+        assert_eq!(
+            rendered.as_deref(),
+            Some("input=100, output=20, cache_create=30, cache_read=40")
+        );
     }
 
     #[test]

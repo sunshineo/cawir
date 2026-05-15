@@ -5,7 +5,10 @@ use crate::{
     Error, Result,
     auth::{ActiveCredential, ApiKeyCredential, AuthOption, CodexOAuthCredential, RequestAuth},
     prompt::SystemPrompt,
-    provider::{Provider, ProviderResponse, ToolDefinition},
+    provider::{
+        Provider, ProviderMetadata, ProviderResponse, TokenUsage, ToolDefinition,
+        api_error_from_response,
+    },
     session::{Message, MessageContent},
 };
 
@@ -138,12 +141,20 @@ struct ResponsesTool {
 #[derive(Deserialize, Debug)]
 struct ChatResponse {
     choices: Vec<Choice>,
+    usage: Option<ChatUsage>,
 }
 
 #[derive(Debug, Default)]
 struct ResponsesStreamAccumulator {
     output: Vec<ResponsesItem>,
     text_delta: String,
+    metadata: ProviderMetadata,
+}
+
+#[derive(Debug, PartialEq)]
+struct ResponsesStreamResponse {
+    blocks: Vec<MessageContent>,
+    metadata: ProviderMetadata,
 }
 
 #[derive(Deserialize, Debug)]
@@ -167,6 +178,25 @@ struct ResponseToolCall {
 struct ResponseToolCallFunction {
     name: String,
     arguments: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct ChatUsage {
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    prompt_tokens_details: Option<OpenAiInputTokenDetails>,
+}
+
+#[derive(Deserialize, Debug)]
+struct ResponsesUsage {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    input_tokens_details: Option<OpenAiInputTokenDetails>,
+}
+
+#[derive(Deserialize, Debug)]
+struct OpenAiInputTokenDetails {
+    cached_tokens: Option<u64>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -221,14 +251,8 @@ impl Provider for OpenAi {
             .send()
             .await?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await?;
-            return Err(Error::Api {
-                provider: self.name().to_string(),
-                status,
-                body,
-            });
+        if !response.status().is_success() {
+            return Err(api_error_from_response(self.name(), response).await);
         }
 
         let parsed: ModelsResponse = response.json().await?;
@@ -278,17 +302,12 @@ impl Provider for OpenAi {
             .send()
             .await?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await?;
-            return Err(Error::Api {
-                provider: self.name().to_string(),
-                status,
-                body,
-            });
+        if !response.status().is_success() {
+            return Err(api_error_from_response(self.name(), response).await);
         }
 
         let parsed: ChatResponse = response.json().await?;
+        let metadata = parsed.metadata();
         let Some(choice) = parsed.choices.into_iter().next() else {
             return Err(Error::EmptyContent(self.name().to_string()));
         };
@@ -298,7 +317,7 @@ impl Provider for OpenAi {
             .iter()
             .any(|block| matches!(block, MessageContent::ToolUse { .. }))
         {
-            return Ok(ProviderResponse::ToolUse(blocks));
+            return Ok(ProviderResponse::tool_use(blocks, metadata));
         }
 
         let reply = render_text_blocks(&blocks);
@@ -306,7 +325,7 @@ impl Provider for OpenAi {
             return Err(Error::EmptyContent(self.name().to_string()));
         }
 
-        Ok(ProviderResponse::Text(reply))
+        Ok(ProviderResponse::text(reply, metadata))
     }
 }
 
@@ -321,14 +340,8 @@ impl OpenAi {
             .send()
             .await?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await?;
-            return Err(Error::Api {
-                provider: self.name().to_string(),
-                status,
-                body,
-            });
+        if !response.status().is_success() {
+            return Err(api_error_from_response(self.name(), response).await);
         }
 
         let parsed: CodexModelsResponse = response.json().await?;
@@ -371,31 +384,68 @@ impl OpenAi {
             .send()
             .await?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await?;
-            return Err(Error::Api {
-                provider: self.name().to_string(),
-                status,
-                body,
-            });
+        if !response.status().is_success() {
+            return Err(api_error_from_response(self.name(), response).await);
         }
 
         let body = response.text().await?;
-        let blocks = responses_stream_to_message_content(&body)?;
-        if blocks
+        let response = responses_stream_to_message_content(&body)?;
+        if response
+            .blocks
             .iter()
             .any(|block| matches!(block, MessageContent::ToolUse { .. }))
         {
-            return Ok(ProviderResponse::ToolUse(blocks));
+            return Ok(ProviderResponse::tool_use(
+                response.blocks,
+                response.metadata,
+            ));
         }
 
-        let reply = render_text_blocks(&blocks);
+        let reply = render_text_blocks(&response.blocks);
         if reply.is_empty() {
             return Err(Error::EmptyContent(self.name().to_string()));
         }
 
-        Ok(ProviderResponse::Text(reply))
+        Ok(ProviderResponse::text(reply, response.metadata))
+    }
+}
+
+impl ChatResponse {
+    fn metadata(&self) -> ProviderMetadata {
+        ProviderMetadata::from_usage(
+            self.usage
+                .as_ref()
+                .map(ChatUsage::token_usage)
+                .unwrap_or_default(),
+        )
+    }
+}
+
+impl ChatUsage {
+    fn token_usage(&self) -> TokenUsage {
+        TokenUsage {
+            input_tokens: self.prompt_tokens,
+            output_tokens: self.completion_tokens,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: self
+                .prompt_tokens_details
+                .as_ref()
+                .and_then(|details| details.cached_tokens),
+        }
+    }
+}
+
+impl ResponsesUsage {
+    fn token_usage(&self) -> TokenUsage {
+        TokenUsage {
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: self
+                .input_tokens_details
+                .as_ref()
+                .and_then(|details| details.cached_tokens),
+        }
     }
 }
 
@@ -682,7 +732,7 @@ fn responses_output_to_message_content(output: Vec<ResponsesItem>) -> Vec<Messag
         .collect()
 }
 
-fn responses_stream_to_message_content(body: &str) -> Result<Vec<MessageContent>> {
+fn responses_stream_to_message_content(body: &str) -> Result<ResponsesStreamResponse> {
     let mut accumulator = ResponsesStreamAccumulator::default();
 
     for event in parse_sse_data_events(body) {
@@ -711,6 +761,15 @@ fn responses_stream_to_message_content(body: &str) -> Result<Vec<MessageContent>
                     accumulator.output.push(item);
                 }
             }
+            "response.completed" => {
+                if let Some(usage) = value
+                    .get("response")
+                    .and_then(|response| response.get("usage"))
+                    && let Ok(usage) = serde_json::from_value::<ResponsesUsage>(usage.clone())
+                {
+                    accumulator.metadata = ProviderMetadata::from_usage(usage.token_usage());
+                }
+            }
             "response.failed" | "response.incomplete" => {
                 return Err(Error::Env(format!("Responses stream failed: {value}")));
             }
@@ -720,11 +779,17 @@ fn responses_stream_to_message_content(body: &str) -> Result<Vec<MessageContent>
 
     let blocks = responses_output_to_message_content(accumulator.output);
     if blocks.is_empty() && !accumulator.text_delta.is_empty() {
-        Ok(vec![MessageContent::Text {
-            text: accumulator.text_delta,
-        }])
+        Ok(ResponsesStreamResponse {
+            blocks: vec![MessageContent::Text {
+                text: accumulator.text_delta,
+            }],
+            metadata: accumulator.metadata,
+        })
     } else {
-        Ok(blocks)
+        Ok(ResponsesStreamResponse {
+            blocks,
+            metadata: accumulator.metadata,
+        })
     }
 }
 
@@ -758,6 +823,7 @@ fn render_text_blocks(blocks: &[MessageContent]) -> String {
 mod tests {
     use super::*;
     use crate::prompt::{PromptSection, SystemPrompt};
+    use crate::provider::{ProviderMetadata, TokenUsage};
 
     #[test]
     fn converts_tool_definition_to_openai_function_tool() {
@@ -889,6 +955,39 @@ mod tests {
     }
 
     #[test]
+    fn parses_chat_completions_usage() {
+        let body = r#"
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": "done"
+                    }
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 101,
+                "completion_tokens": 11
+            }
+        }
+        "#;
+
+        let parsed: ChatResponse = serde_json::from_str(body).unwrap();
+
+        assert_eq!(
+            parsed.metadata(),
+            ProviderMetadata {
+                usage: Some(TokenUsage {
+                    input_tokens: Some(101),
+                    output_tokens: Some(11),
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
+                })
+            }
+        );
+    }
+
+    #[test]
     fn converts_history_to_responses_items() {
         let history = vec![
             Message::user_text("read Cargo.toml"),
@@ -1011,10 +1110,10 @@ mod tests {
         });
         let body = format!("event: response.output_item.done\ndata: {item}\n\n");
 
-        let blocks = responses_stream_to_message_content(&body).unwrap();
+        let response = responses_stream_to_message_content(&body).unwrap();
 
         assert_eq!(
-            blocks,
+            response.blocks,
             vec![MessageContent::Text {
                 text: "hello".to_string()
             }]
@@ -1032,13 +1131,37 @@ mod tests {
             "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_123\"}}\n\n",
         );
 
-        let blocks = responses_stream_to_message_content(body).unwrap();
+        let response = responses_stream_to_message_content(body).unwrap();
 
         assert_eq!(
-            blocks,
+            response.blocks,
             vec![MessageContent::Text {
                 text: "hello".to_string()
             }]
+        );
+    }
+
+    #[test]
+    fn parses_responses_sse_usage() {
+        let body = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":222,\"output_tokens\":33}}}\n\n",
+        );
+
+        let response = responses_stream_to_message_content(body).unwrap();
+
+        assert_eq!(
+            response.metadata,
+            ProviderMetadata {
+                usage: Some(TokenUsage {
+                    input_tokens: Some(222),
+                    output_tokens: Some(33),
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
+                })
+            }
         );
     }
 }

@@ -7,7 +7,10 @@ use crate::{
     Error, Result,
     auth::{ActiveCredential, AuthOption},
     prompt::SystemPrompt,
-    provider::{Provider, ProviderResponse, ToolDefinition},
+    provider::{
+        Provider, ProviderMetadata, ProviderResponse, TokenUsage, ToolDefinition,
+        api_error_from_response,
+    },
     session::{Message, MessageContent},
 };
 
@@ -71,6 +74,8 @@ struct OllamaToolFunction {
 #[derive(Deserialize, Debug)]
 struct ChatResponse {
     message: OllamaMessage,
+    prompt_eval_count: Option<u64>,
+    eval_count: Option<u64>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -102,14 +107,8 @@ impl Provider for Ollama {
         _credential: &ActiveCredential,
     ) -> Result<Vec<String>> {
         let response = client.get(OLLAMA_TAGS_URL).send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await?;
-            return Err(Error::Api {
-                provider: self.name().to_string(),
-                status,
-                body,
-            });
+        if !response.status().is_success() {
+            return Err(api_error_from_response(self.name(), response).await);
         }
 
         let parsed: TagsResponse = response.json().await?;
@@ -150,23 +149,18 @@ impl Provider for Ollama {
             .send()
             .await?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await?;
-            return Err(Error::Api {
-                provider: self.name().to_string(),
-                status,
-                body,
-            });
+        if !response.status().is_success() {
+            return Err(api_error_from_response(self.name(), response).await);
         }
 
         let parsed: ChatResponse = response.json().await?;
+        let metadata = parsed.metadata();
         let blocks = to_message_content(parsed.message);
         if blocks
             .iter()
             .any(|block| matches!(block, MessageContent::ToolUse { .. }))
         {
-            return Ok(ProviderResponse::ToolUse(blocks));
+            return Ok(ProviderResponse::tool_use(blocks, metadata));
         }
 
         let reply = render_text_blocks(&blocks);
@@ -174,7 +168,18 @@ impl Provider for Ollama {
             return Err(Error::EmptyContent(self.name().to_string()));
         }
 
-        Ok(ProviderResponse::Text(reply))
+        Ok(ProviderResponse::text(reply, metadata))
+    }
+}
+
+impl ChatResponse {
+    fn metadata(&self) -> ProviderMetadata {
+        ProviderMetadata::from_usage(TokenUsage {
+            input_tokens: self.prompt_eval_count,
+            output_tokens: self.eval_count,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        })
     }
 }
 
@@ -355,6 +360,7 @@ fn render_text_blocks(blocks: &[MessageContent]) -> String {
 mod tests {
     use super::*;
     use crate::prompt::{PromptSection, SystemPrompt};
+    use crate::provider::{ProviderMetadata, TokenUsage};
 
     #[test]
     fn converts_tool_definition_to_ollama_function_tool() {
@@ -484,6 +490,34 @@ mod tests {
                     input: json!({ "path": "Cargo.toml" })
                 }
             ]
+        );
+    }
+
+    #[test]
+    fn parses_ollama_token_counts_as_usage() {
+        let body = r#"
+        {
+            "message": {
+                "role": "assistant",
+                "content": "done"
+            },
+            "prompt_eval_count": 21,
+            "eval_count": 8
+        }
+        "#;
+
+        let parsed: ChatResponse = serde_json::from_str(body).unwrap();
+
+        assert_eq!(
+            parsed.metadata(),
+            ProviderMetadata {
+                usage: Some(TokenUsage {
+                    input_tokens: Some(21),
+                    output_tokens: Some(8),
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
+                })
+            }
         );
     }
 
