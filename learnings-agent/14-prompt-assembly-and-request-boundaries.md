@@ -44,3 +44,17 @@ This also matters for caching. Anthropic includes structured tools in the cached
 - Do not add thinking-clearing headers or mutate prior reasoning/context as a cache optimization. Anthropic's April 2026 Claude Code postmortem showed how a repeated `clear_thinking_20251015` request flag caused degraded behavior and cache misses.
 
 The resulting request has two cache layers: a stable project/tool/system prefix, and an automatic conversation prefix. This is slightly more explicit than automatic-only caching, but it keeps the provider-specific choice isolated inside `anthropic.rs`.
+
+## Why cawir does not use every cache breakpoint yet
+
+Claude Code can use multiple cache breakpoints because it has multiple large context layers with different stability profiles. cawir does not yet have subagents, compaction summaries, memory extraction, dynamic MCP context, plugin context, or skill-selected context.
+
+So 8.5h uses only the breakpoints that match cawir's current request shape:
+
+```text
+tools + system/project guidance  -> explicit system-block breakpoint
+conversation history             -> top-level automatic moving breakpoint
+newest turn                      -> fresh uncached tail
+```
+
+Adding more breakpoints before more context layers exist would be cargo-culting Claude Code's shape rather than learning from it. The right time to add another breakpoint is when cawir adds a new request layer that is large, stable across turns, and invalidates differently from the current tools/system/history layers.

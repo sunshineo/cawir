@@ -151,6 +151,7 @@ where
 
                 let tool_execution = tools::execute_tool_uses_with_approval(
                     context.tool_registry,
+                    context.project_root,
                     &blocks,
                     context.mode,
                     &mut *hooks.emit,

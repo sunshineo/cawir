@@ -112,3 +112,25 @@ expand the workspace
 ```
 
 Combining them into one mode would make `Bypass` too broad.
+
+## One project root per turn
+
+Checkpoint 8.5i fixed an important boundary mismatch before hooks landed. Prompt assembly already used the session's saved project path, but tool execution was still deriving its workspace boundary from `std::env::current_dir()`.
+
+That can split one turn into two different projects:
+
+```text
+prompt says: cwd: /Users/gordon/code/cawir
+tools enforce: /Users/gordon/code/other
+```
+
+The rule is now:
+
+```text
+the turn owns the project root
+prompt assembly, tool policy, and future hooks all receive that same root
+```
+
+This matters for resumed sessions. A session started in one project should continue to operate on that project even if the user launches cawir from a different directory later.
+
+The deeper design lesson: workspace policy should be explicit data flowing through the agent turn, not ambient process state. `current_dir()` is useful at startup when creating a new session; after that, the saved session project root is the source of truth.

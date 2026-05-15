@@ -99,3 +99,26 @@ Before canonicalization, cawir also does a lexical normalization pass over `.` a
 ```
 
 That future shape would let the approval prompt name both effects: creating directories and writing the file.
+
+## Passing `&Path` through the turn
+
+Checkpoint 8.5i made the project root explicit in tool execution:
+
+```rust
+fn execute_tool_uses_with_approval(
+    registry: &ToolRegistry,
+    project_root: &Path,
+    // ...
+)
+```
+
+This uses `&Path` instead of `PathBuf` because the function does not need to own the root. The session/runtime already owns the project path for the turn; tool execution only needs to borrow it long enough to canonicalize and compare requested paths.
+
+The distinction is:
+
+```text
+PathBuf: keep this path as part of my data
+&Path: inspect or use this path during this call
+```
+
+Borrowing the root also makes the data flow visible. A function that accepts `&Path` is no longer secretly coupled to `std::env::current_dir()`, which makes tests and resumed-session behavior easier to reason about.

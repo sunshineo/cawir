@@ -117,7 +117,17 @@ Checkpoint 8.5g renamed the tool events from `ToolUseRequested` / `ToolUseFinish
 
 This is the earliest useful hook point. A future hook may want to reject a tool call before any local behavior happens. Later, if hooks need the canonical prepared form too, cawir can add a second event point after preparation and policy validation. That pressure does not exist yet.
 
-`PostToolUse` summarizes what happened after execution: output length, error flag, and optional error string. The full tool output still belongs in `MessageContent::ToolResult`, not in the event.
+`PostToolUse` summarizes what happened after execution: original input, output length, error flag, and optional error string. The full tool output still belongs in `MessageContent::ToolResult`, not in the event.
+
+Checkpoint 8.5i added the original input to `PostToolUse` for hooks. A command hook receives one event JSON object on stdin; it should not have to remember a previous `PreToolUse` event just to answer basic questions like:
+
+```text
+which file did write_file touch?
+was the target path a Rust file?
+should a post-write formatter run?
+```
+
+This intentionally duplicates a small amount of data between pre-tool and post-tool events. The alternative would force every stateless command hook to build its own correlation store keyed by tool id, which is too much machinery before hooks even exist.
 
 ## Why the REPL renders
 

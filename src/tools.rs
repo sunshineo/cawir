@@ -73,6 +73,7 @@ impl ToolRegistry {
 
     fn execute<F>(
         &self,
+        project_root: &Path,
         name: &str,
         input: &Value,
         mode: PermissionMode,
@@ -87,7 +88,7 @@ impl ToolRegistry {
             .find(|tool| tool.name() == name)
             .ok_or_else(|| Error::UnknownTool(name.to_string()))?;
 
-        let context = ToolContext::current_project()?;
+        let context = ToolContext::from_project_root(project_root)?;
         let prepared = tool.prepare(input, &context)?;
         apply_permission_decision(mode, &prepared, approve)?;
         tool.execute(prepared.input)
@@ -104,9 +105,9 @@ struct ToolContext {
 }
 
 impl ToolContext {
-    fn current_project() -> Result<Self> {
+    fn from_project_root(project_root: &Path) -> Result<Self> {
         Ok(Self {
-            project_root: std::env::current_dir()?.canonicalize()?,
+            project_root: project_root.canonicalize()?,
         })
     }
 }
@@ -583,11 +584,27 @@ pub(crate) fn execute_tool_uses<F>(
 where
     F: FnMut(AgentEvent),
 {
-    execute_tool_uses_with_approval(registry, blocks, mode, emit, |_| Ok(true))
+    let project_root = std::env::current_dir().expect("test process should have a current dir");
+    execute_tool_uses_in_project(registry, &project_root, blocks, mode, emit)
+}
+
+#[cfg(test)]
+fn execute_tool_uses_in_project<F>(
+    registry: &ToolRegistry,
+    project_root: &Path,
+    blocks: &[MessageContent],
+    mode: PermissionMode,
+    emit: F,
+) -> ToolExecution
+where
+    F: FnMut(AgentEvent),
+{
+    execute_tool_uses_with_approval(registry, project_root, blocks, mode, emit, |_| Ok(true))
 }
 
 pub(crate) fn execute_tool_uses_with_approval<F, A>(
     registry: &ToolRegistry,
+    project_root: &Path,
     blocks: &[MessageContent],
     mode: PermissionMode,
     mut emit: F,
@@ -609,11 +626,12 @@ where
                     name: name.clone(),
                     input: input.clone(),
                 });
-                match registry.execute(name, input, mode, &mut approve) {
+                match registry.execute(project_root, name, input, mode, &mut approve) {
                     Ok(ToolOutput::Result(content)) => {
                         emit(AgentEvent::PostToolUse {
                             id: id.clone(),
                             name: name.clone(),
+                            input: input.clone(),
                             output_len: content.len(),
                             is_error: false,
                             error: None,
@@ -628,6 +646,7 @@ where
                         emit(AgentEvent::PostToolUse {
                             id: id.clone(),
                             name: name.clone(),
+                            input: input.clone(),
                             output_len: plan.len(),
                             is_error: false,
                             error: None,
@@ -642,6 +661,7 @@ where
                         emit(AgentEvent::PostToolUse {
                             id: id.clone(),
                             name: name.clone(),
+                            input: input.clone(),
                             output_len: content.len(),
                             is_error: true,
                             error: Some(content.clone()),
@@ -679,7 +699,8 @@ fn execute_tool_call_with_approval<F>(
 where
     F: FnMut(&ToolApprovalRequest) -> Result<bool>,
 {
-    match ToolRegistry::builtins().execute(name, input, mode, &mut approve)? {
+    let project_root = std::env::current_dir()?;
+    match ToolRegistry::builtins().execute(&project_root, name, input, mode, &mut approve)? {
         ToolOutput::Result(content) => Ok(content),
         ToolOutput::PlanReady(_) => Err(Error::ToolInput {
             tool: name.to_string(),
@@ -1251,11 +1272,12 @@ mod tests {
                 AgentEvent::PreToolUse {
                     id: "toolu_event".to_string(),
                     name: "read_file".to_string(),
-                    input,
+                    input: input.clone(),
                 },
                 AgentEvent::PostToolUse {
                     id: "toolu_event".to_string(),
                     name: "read_file".to_string(),
+                    input: input.clone(),
                     output_len: "event result".len(),
                     is_error: false,
                     error: None,
@@ -1272,6 +1294,43 @@ mod tests {
         );
 
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn tool_execution_uses_supplied_project_root_for_relative_paths() {
+        let project = project_test_path("session-project");
+        let other = project_test_path("process-cwd");
+        let registry = ToolRegistry::builtins();
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        std::fs::write(project.join("Cargo.toml"), "session project").unwrap();
+        std::fs::write(other.join("Cargo.toml"), "process cwd").unwrap();
+
+        let blocks = vec![MessageContent::ToolUse {
+            id: "toolu_project_root".to_string(),
+            name: "read_file".to_string(),
+            input: json!({ "path": "Cargo.toml" }),
+        }];
+
+        let execution = execute_tool_uses_in_project(
+            &registry,
+            &project,
+            &blocks,
+            PermissionMode::Default,
+            |_| {},
+        );
+
+        assert_eq!(
+            execution.results,
+            vec![ToolResult {
+                tool_use_id: "toolu_project_root".to_string(),
+                content: "session project".to_string(),
+                is_error: false,
+            }]
+        );
+
+        std::fs::remove_dir_all(project).unwrap();
+        std::fs::remove_dir_all(other).unwrap();
     }
 
     #[test]

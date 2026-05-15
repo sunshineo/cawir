@@ -52,6 +52,7 @@ pub(crate) enum AgentEvent {
     PostToolUse {
         id: String,
         name: String,
+        input: Value,
         output_len: usize,
         is_error: bool,
         error: Option<String>,
@@ -127,6 +128,39 @@ mod tests {
                 "kind": "provider_request",
                 "message": "anthropic rate limited",
                 "retryable": true
+            })
+        );
+    }
+
+    #[test]
+    fn post_tool_use_serializes_original_input_for_hooks() {
+        let event = AgentEvent::PostToolUse {
+            id: "toolu_write".to_string(),
+            name: "write_file".to_string(),
+            input: json!({
+                "path": "src/main.rs",
+                "content": "fn main() {}\n"
+            }),
+            output_len: 26,
+            is_error: false,
+            error: None,
+        };
+
+        let value = serde_json::to_value(event).unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "type": "post_tool_use",
+                "id": "toolu_write",
+                "name": "write_file",
+                "input": {
+                    "path": "src/main.rs",
+                    "content": "fn main() {}\n"
+                },
+                "output_len": 26,
+                "is_error": false,
+                "error": null
             })
         );
     }
