@@ -7,9 +7,9 @@ Checkpoint 9 turned the event vocabulary from passive progress data into a synch
 cawir now loads settings in this order:
 
 ```text
-~/.claude/settings.json
-<project>/.claude/settings.json
-<project>/.claude/settings.local.json
+<OS config dir>/settings.json
+<project>/.cawir/settings.json
+<project>/.cawir/settings.local.json
 ```
 
 Later files override earlier files, with recursive object merging. This gives three scopes:
@@ -19,6 +19,8 @@ Later files override earlier files, with recursive object merging. This gives th
 - local project settings that can stay machine-specific
 
 The outer settings file stays open-ended JSON for now. That keeps checkpoint 9 from inventing typed structures for settings that do not exist yet. Each consumer should parse only the section it owns; hooks parse `hooks`, future plugin or skill code can parse its own section later.
+
+cawir settings deliberately use cawir-owned paths. Project guidance can still come from `AGENTS.md` / `CLAUDE.md`, but executable settings should not share Claude Code's `.claude/settings.json`; that file has a different schema and belongs to another tool.
 
 ## Hooks consume the same events surfaces render
 

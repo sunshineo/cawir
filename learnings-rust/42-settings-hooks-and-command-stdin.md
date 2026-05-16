@@ -39,6 +39,16 @@ That avoids designing the whole future settings schema before the project has re
 
 This is different from session data. `Session` is durable cawir-owned data, so it should stay strongly typed. Settings are an extension surface, so the outer shape can stay flexible while specific consumers parse their own section.
 
+One consequence from the first implementation bug: do not reuse another tool's settings path just because the filenames look similar. Claude Code's `.claude/settings.json` contains Claude-owned hook groups with a different shape. cawir now keeps settings in cawir-owned paths:
+
+```text
+<OS config dir>/settings.json
+<project>/.cawir/settings.json
+<project>/.cawir/settings.local.json
+```
+
+That keeps project guidance (`AGENTS.md` / `CLAUDE.md`) separate from executable cawir settings.
+
 ## `Box<dyn HookHandler>`
 
 The hook registry stores handlers like this:

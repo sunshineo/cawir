@@ -65,9 +65,9 @@ cawir is a **component graph**, not a linear stack. The agent loop is the orches
               Session { id, messages, ... }
 
 Read-everywhere:  SettingsResolver
-                    ◄── ./.claude/settings.local.json
-                    ◄── ./.claude/settings.json
-                    ◄── ~/.claude/settings.json
+                    ◄── ./.cawir/settings.local.json
+                    ◄── ./.cawir/settings.json
+                    ◄── OS config dir / settings.json
 ```
 
 Key properties of this shape:
@@ -85,7 +85,7 @@ Where user input arrives and agent output is rendered. Tightly coupled component
 
 **REPL** — reads user input from stdin, submits to the agent loop, consumes `Stream<AgentEvent>`, renders events to stdout. The only component that knows about terminal formatting.
 
-**Slash-command parsing** — intercepts `/commands` before they reach the agent loop. Built-ins: `/exit`, `/clear`, `/help`, `/provider`, `/mode`, `/resume`. Additional commands can be loaded from `.claude/commands/*.md` or plugins later.
+**Slash-command parsing** — intercepts `/commands` before they reach the agent loop. Built-ins: `/exit`, `/clear`, `/help`, `/provider`, `/mode`, `/resume`. Additional commands can be loaded from `.cawir/commands/*.md` or plugins later.
 
 **Seam — alternate transports.** Swapping the REPL for a different consumer of `Stream<AgentEvent>` (`ratatui` TUI, WebSocket server, daemon mode, SDK stdio NDJSON) is a Surface-only change. The agent loop is transport-agnostic.
 
@@ -278,7 +278,7 @@ Provider × Auth compatibility matrix (per ToS):
 
 **Credential chain** resolves credentials for a given provider: credentials file → environment variable → `.env` file. The chain is queried by the auth layer at request time.
 
-**SettingsResolver** resolves any config key by walking: `./.claude/settings.local.json` → `./.claude/settings.json` → `~/.claude/settings.json`, deep-merging in precedence order. Read-everywhere utility — used by the hook registry, tool registry, slash-command loading, and any other component that reads configuration.
+**SettingsResolver** resolves any config key by walking: OS config directory `settings.json` → `./.cawir/settings.json` → `./.cawir/settings.local.json`, deep-merging in precedence order. It deliberately uses cawir-owned paths instead of Claude Code's `.claude/settings.json` so cawir does not couple itself to another tool's settings schema. Read-everywhere utility — used by the hook registry, tool registry, slash-command loading, and any other component that reads configuration.
 
 ## Session as pure data
 

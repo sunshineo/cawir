@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use directories::BaseDirs;
+use directories::ProjectDirs;
 use serde_json::{Map, Value};
 
 use crate::{Error, Result};
@@ -13,8 +13,8 @@ pub(crate) struct SettingsResolver {
 impl SettingsResolver {
     pub(crate) fn for_project(project_root: &Path) -> Result<Self> {
         let user_settings = user_settings_path()?;
-        let project_settings = project_root.join(".claude").join("settings.json");
-        let local_settings = project_root.join(".claude").join("settings.local.json");
+        let project_settings = project_root.join(".cawir").join("settings.json");
+        let local_settings = project_root.join(".cawir").join("settings.local.json");
 
         Ok(Self::from_paths(vec![
             user_settings,
@@ -51,10 +51,10 @@ impl SettingsResolver {
 }
 
 fn user_settings_path() -> Result<PathBuf> {
-    let dirs = BaseDirs::new()
-        .ok_or_else(|| Error::Env("could not determine home directory".to_string()))?;
+    let dirs = ProjectDirs::from("dev", "cawir", "cawir")
+        .ok_or_else(|| Error::Env("could not determine OS config directory".to_string()))?;
 
-    Ok(dirs.home_dir().join(".claude").join("settings.json"))
+    Ok(dirs.config_dir().join("settings.json"))
 }
 
 fn deep_merge(target: &mut Value, source: Value) {
@@ -168,5 +168,78 @@ mod tests {
         );
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn project_settings_paths_are_cawir_owned() {
+        let project = settings_test_path("project-paths");
+        let resolver = SettingsResolver::for_project(&project).unwrap();
+
+        assert!(resolver.paths[0].ends_with("settings.json"));
+        assert!(!resolver.paths[0].to_string_lossy().contains(".claude"));
+        assert_eq!(
+            resolver.paths[1],
+            project.join(".cawir").join("settings.json")
+        );
+        assert_eq!(
+            resolver.paths[2],
+            project.join(".cawir").join("settings.local.json")
+        );
+
+        if project.exists() {
+            std::fs::remove_dir_all(project).unwrap();
+        }
+    }
+
+    #[test]
+    fn resolver_does_not_read_project_claude_settings() {
+        let project = settings_test_path("ignore-claude");
+        std::fs::create_dir_all(project.join(".claude")).unwrap();
+        std::fs::create_dir_all(project.join(".cawir")).unwrap();
+        std::fs::write(
+            project.join(".claude").join("settings.json"),
+            r#"{
+                "hooks": {
+                    "Stop": [
+                        {
+                            "matcher": "",
+                            "hooks": [
+                                { "type": "command", "command": "claude-code-hook" }
+                            ]
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.join(".cawir").join("settings.json"),
+            r#"{
+                "hooks": {
+                    "pre_tool_use": [
+                        { "type": "command", "command": "cawir-hook" }
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let settings = SettingsResolver::for_project(&project)
+            .unwrap()
+            .load()
+            .unwrap();
+
+        assert_eq!(
+            settings,
+            json!({
+                "hooks": {
+                    "pre_tool_use": [
+                        { "type": "command", "command": "cawir-hook" }
+                    ]
+                }
+            })
+        );
+
+        std::fs::remove_dir_all(project).unwrap();
     }
 }
