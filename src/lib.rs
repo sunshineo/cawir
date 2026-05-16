@@ -14,6 +14,7 @@ mod provider;
 mod repl;
 pub mod session;
 mod settings;
+mod skills;
 mod tools;
 
 pub use error::{Error, Result};

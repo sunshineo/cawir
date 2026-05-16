@@ -91,6 +91,15 @@ impl PluginCatalog {
 
         Ok(commands)
     }
+
+    pub(crate) fn skill_directories(&self) -> Vec<PathBuf> {
+        let mut directories = Vec::new();
+        for plugin in &self.plugins {
+            directories.extend(plugin.skill_directories());
+        }
+        directories.sort();
+        directories
+    }
 }
 
 #[derive(Debug)]
@@ -162,6 +171,32 @@ struct PluginManifest {
     hooks: Value,
     #[serde(default = "empty_object")]
     settings: Value,
+    #[serde(default)]
+    skill_dirs: Vec<String>,
+}
+
+impl PluginPackage {
+    fn skill_directories(&self) -> Vec<PathBuf> {
+        let mut directories = Vec::new();
+
+        let conventional = self.root.join("skills");
+        if conventional.is_dir() {
+            directories.push(conventional);
+        }
+
+        for path in &self.manifest.skill_dirs {
+            let path = resolve_configured_path(path, &self.root);
+            if let Ok(path) = path.canonicalize()
+                && path.is_dir()
+            {
+                directories.push(path);
+            }
+        }
+
+        directories.sort();
+        directories.dedup();
+        directories
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -824,6 +859,32 @@ mod tests {
                 "plugin__ordered_plugin__alpha".to_string(),
                 "plugin__ordered_plugin__zeta".to_string(),
             ]
+        );
+
+        std::fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn plugin_catalog_exposes_conventional_skill_directories() {
+        let project = plugin_test_path("plugin-skills");
+        let plugin = project.join("plugins").join("teacher");
+        write_manifest(
+            &plugin,
+            r#"{
+                "name": "teacher"
+            }"#,
+        );
+        std::fs::create_dir_all(plugin.join("skills")).unwrap();
+        let settings = json!({
+            "plugins": {
+                "directories": ["plugins"]
+            }
+        });
+        let catalog = PluginCatalog::from_settings(&settings, &project).unwrap();
+
+        assert_eq!(
+            catalog.skill_directories(),
+            vec![plugin.join("skills").canonicalize().unwrap()]
         );
 
         std::fs::remove_dir_all(project).unwrap();

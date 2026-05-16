@@ -9,6 +9,7 @@ use crate::{
     prompt,
     provider::{Provider, ProviderEvent, ProviderRequest, ProviderResponse},
     session::{Message, MessageContent},
+    skills::Skill,
     tools::{self, PlanReady, ToolApprovalRequest, ToolRegistry},
 };
 
@@ -41,6 +42,7 @@ where
     pub(crate) mode: PermissionMode,
     pub(crate) tool_registry: &'a ToolRegistry,
     pub(crate) hook_registry: &'a HookRegistry,
+    pub(crate) active_skills: &'a [Skill],
 }
 
 pub(crate) fn submit_user_prompt(
@@ -69,14 +71,21 @@ where
     loop {
         let tool_definitions = context.tool_registry.definitions(context.mode);
         let tool_definition_fingerprint = tools::tool_definition_fingerprint(&tool_definitions)?;
+        let active_skill_names = context
+            .active_skills
+            .iter()
+            .map(|skill| skill.name.clone())
+            .collect::<Vec<_>>();
 
         (hooks.emit)(AgentEvent::ModelRequestStart {
             provider: context.provider.name().to_string(),
             model: context.model.to_string(),
             tool_definition_fingerprint: tool_definition_fingerprint.clone(),
+            active_skills: active_skill_names.clone(),
         });
 
-        let prompt = match prompt::assemble(context.project_root) {
+        let prompt = match prompt::assemble_with_skills(context.project_root, context.active_skills)
+        {
             Ok(prompt) => prompt,
             Err(error) => {
                 (hooks.emit)(AgentEvent::stop_failure(
@@ -122,6 +131,7 @@ where
             model: context.model.to_string(),
             metadata,
             tool_definition_fingerprint,
+            active_skills: active_skill_names,
         });
 
         match response {

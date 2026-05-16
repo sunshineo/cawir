@@ -39,12 +39,14 @@ pub(crate) enum AgentEvent {
         provider: String,
         model: String,
         tool_definition_fingerprint: String,
+        active_skills: Vec<String>,
     },
     ModelRequestFinish {
         provider: String,
         model: String,
         metadata: ProviderMetadata,
         tool_definition_fingerprint: String,
+        active_skills: Vec<String>,
     },
     PreToolUse {
         id: String,

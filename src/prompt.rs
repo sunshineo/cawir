@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, fs, path::Path};
 
-use crate::Result;
+use crate::{Result, skills::Skill};
 
 const IDENTITY: &str = "You are cawir, a minimal coding agent written in Rust.";
 const BEHAVIOR: &str =
@@ -32,7 +32,15 @@ impl SystemPrompt {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn assemble(project_path: &Path) -> Result<SystemPrompt> {
+    assemble_with_skills(project_path, &[])
+}
+
+pub(crate) fn assemble_with_skills(
+    project_path: &Path,
+    active_skills: &[Skill],
+) -> Result<SystemPrompt> {
     let project_path = project_path.canonicalize()?;
     let mut sections = vec![
         section("identity", IDENTITY),
@@ -43,6 +51,13 @@ pub(crate) fn assemble(project_path: &Path) -> Result<SystemPrompt> {
     let guidance = load_project_guidance(&project_path)?;
     if !guidance.is_empty() {
         sections.push(section("project_guidance", guidance.join("\n\n")));
+    }
+
+    if !active_skills.is_empty() {
+        sections.push(section(
+            "active_skills",
+            render_active_skills(active_skills),
+        ));
     }
 
     Ok(SystemPrompt { sections })
@@ -86,6 +101,32 @@ fn load_project_guidance(project_path: &Path) -> Result<Vec<String>> {
     }
 
     Ok(guidance)
+}
+
+fn render_active_skills(active_skills: &[Skill]) -> String {
+    active_skills
+        .iter()
+        .map(|skill| {
+            let mut parts = vec![
+                format!("## {}", skill.name),
+                format!("Description: {}", skill.description),
+            ];
+            if !skill.trigger_guidance.is_empty() {
+                parts.push(format!(
+                    "Trigger guidance:\n{}",
+                    skill
+                        .trigger_guidance
+                        .iter()
+                        .map(|trigger| format!("- {trigger}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ));
+            }
+            parts.push(format!("Instructions:\n{}", skill.instructions));
+            parts.join("\n\n")
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn display_guidance_path(project_path: &Path, path: &Path) -> String {
@@ -148,6 +189,28 @@ mod tests {
         let rendered = prompt.render_text();
 
         assert_eq!(rendered.matches("same rule").count(), 1);
+    }
+
+    #[test]
+    fn active_skills_render_as_prompt_section() {
+        let workspace = TestWorkspace::new("prompt_active_skills");
+        let skills = vec![crate::skills::Skill {
+            name: "rust-tutor".to_string(),
+            description: "Teach Rust concepts while coding".to_string(),
+            trigger_guidance: vec!["ownership".to_string()],
+            instructions: "Explain ownership and borrowing when they appear.".to_string(),
+        }];
+
+        let prompt = assemble_with_skills(&workspace.root, &skills).unwrap();
+        let rendered = prompt.render_text();
+
+        assert_eq!(
+            section_names(&prompt),
+            vec!["identity", "behavior", "environment", "active_skills"]
+        );
+        assert!(rendered.contains("## rust-tutor"));
+        assert!(rendered.contains("Teach Rust concepts while coding"));
+        assert!(rendered.contains("Explain ownership and borrowing when they appear."));
     }
 
     fn section_names(prompt: &SystemPrompt) -> Vec<&str> {

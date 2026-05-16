@@ -28,6 +28,7 @@ use crate::{
         list_resumable_project_sessions, load_most_recent_session, load_session, save_session,
     },
     settings::SettingsResolver,
+    skills::SkillCatalog,
     tools::{ToolApprovalRequest, ToolRegistry},
 };
 
@@ -122,6 +123,7 @@ struct CommandContext<'a> {
     model_preferences: &'a mut BTreeMap<String, String>,
     tool_registry: &'a mut ToolRegistry,
     hook_registry: &'a mut HookRegistry,
+    skill_catalog: &'a mut SkillCatalog,
     client: &'a reqwest::Client,
     session: &'a mut Session,
 }
@@ -141,6 +143,7 @@ struct Runtime {
     command_registry: CommandRegistry,
     tool_registry: ToolRegistry,
     hook_registry: HookRegistry,
+    skill_catalog: SkillCatalog,
 }
 
 struct ExitCommand;
@@ -375,6 +378,7 @@ pub async fn run() -> Result<()> {
         command_registry: CommandRegistry::builtins(),
         tool_registry: ToolRegistry::builtins(),
         hook_registry: HookRegistry::empty(),
+        skill_catalog: SkillCatalog::empty(),
     };
     let mut session = resumed_session.unwrap_or_else(|| {
         Session::new(
@@ -386,6 +390,7 @@ pub async fn run() -> Result<()> {
     let project_path = session_project_path(&session)?;
     runtime.command_registry = CommandRegistry::for_project(&project_path)?;
     runtime.tool_registry = tool_registry_for_project(&project_path)?;
+    runtime.skill_catalog = skill_catalog_for_project(&project_path)?;
     if is_resuming {
         warn_if_tool_fingerprint_changed(&session, &runtime.tool_registry)?;
     }
@@ -434,6 +439,7 @@ pub async fn run() -> Result<()> {
                 model_preferences: &mut runtime.model_preferences,
                 tool_registry: &mut runtime.tool_registry,
                 hook_registry: &mut runtime.hook_registry,
+                skill_catalog: &mut runtime.skill_catalog,
                 client: &runtime.client,
                 session: &mut session,
             };
@@ -451,6 +457,7 @@ pub async fn run() -> Result<()> {
                 Some(Ok(CommandOutcome::ReloadProjectCommands)) => {
                     let project_path = session_project_path(&session)?;
                     runtime.command_registry = CommandRegistry::for_project(&project_path)?;
+                    runtime.skill_catalog = skill_catalog_for_project(&project_path)?;
                     sync_session_from_runtime(&mut session, &runtime)?;
                     save_session_if_needed(&mut session, is_resuming)?;
                 }
@@ -468,6 +475,7 @@ pub async fn run() -> Result<()> {
             session_project_path(&session)?,
             &mut session.mode,
             &mut session.messages,
+            trimmed,
             &mut render,
         )
         .await
@@ -568,6 +576,8 @@ async fn resume_session(
     let project_path = session_project_path(&new_session).map_err(|error| error.to_string())?;
     let new_tool_registry =
         tool_registry_for_project(&project_path).map_err(|error| error.to_string())?;
+    let new_skill_catalog =
+        skill_catalog_for_project(&project_path).map_err(|error| error.to_string())?;
     warn_if_tool_fingerprint_changed(&new_session, &new_tool_registry)
         .map_err(|error| error.to_string())?;
 
@@ -586,6 +596,7 @@ async fn resume_session(
     .map_err(|error| error.to_string())?;
     *context.session = new_session;
     *context.tool_registry = new_tool_registry;
+    *context.skill_catalog = new_skill_catalog;
     *context.hook_registry =
         HookRegistry::for_project(&project_path).map_err(|error| error.to_string())?;
 
@@ -692,8 +703,10 @@ async fn run_agent_until_complete(
     project_root: PathBuf,
     mode: &mut PermissionMode,
     history: &mut Vec<Message>,
+    user_prompt: &str,
     emit: &mut impl FnMut(AgentEvent),
 ) -> Result<()> {
+    let active_skills = runtime.skill_catalog.activate_for_prompt(user_prompt)?;
     loop {
         let mut approve_tool = approve_tool_interactively;
         let mut hooks = agent::TurnHooks {
@@ -710,6 +723,7 @@ async fn run_agent_until_complete(
             mode: *mode,
             tool_registry: &runtime.tool_registry,
             hook_registry: &runtime.hook_registry,
+            active_skills: &active_skills,
         };
 
         match agent::run_turn(context, history, &mut hooks).await? {
@@ -766,6 +780,15 @@ fn tool_registry_for_project(project_root: &Path) -> Result<ToolRegistry> {
     Ok(registry)
 }
 
+fn skill_catalog_for_project(project_root: &Path) -> Result<SkillCatalog> {
+    let settings = SettingsResolver::for_project(project_root)?.load()?;
+    let plugins = PluginCatalog::from_settings(&settings, project_root)?;
+    let plugin_skill_directories = plugins.skill_directories();
+    let settings = plugins.merged_settings(settings);
+
+    SkillCatalog::from_settings(&settings, project_root, plugin_skill_directories)
+}
+
 fn warn_if_tool_fingerprint_changed(session: &Session, registry: &ToolRegistry) -> Result<()> {
     let current_fingerprint = registry.definition_fingerprint(session.mode)?;
     if let Some(warning) = tool_fingerprint_resume_warning(
@@ -817,18 +840,23 @@ fn render_agent_event_to_writer(
             provider,
             model,
             tool_definition_fingerprint,
+            active_skills,
         } => {
-            let _ = (provider, model, tool_definition_fingerprint);
+            let _ = (provider, model, tool_definition_fingerprint, active_skills);
         }
         AgentEvent::ModelRequestFinish {
             provider,
             model,
             metadata,
             tool_definition_fingerprint,
+            active_skills,
         } => {
             finish_stream_line(writer, state)?;
-            let observability =
-                render_request_observability(&metadata, &tool_definition_fingerprint);
+            let observability = render_request_observability(
+                &metadata,
+                &tool_definition_fingerprint,
+                &active_skills,
+            );
             writeln!(
                 writer,
                 "model request from {provider}/{model}: {observability}"
@@ -932,11 +960,18 @@ fn render_provider_metadata(metadata: &ProviderMetadata) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(", "))
 }
 
-fn render_request_observability(metadata: &ProviderMetadata, tool_fingerprint: &str) -> String {
+fn render_request_observability(
+    metadata: &ProviderMetadata,
+    tool_fingerprint: &str,
+    active_skills: &[String],
+) -> String {
     let mut parts = render_provider_metadata(metadata)
         .map(|usage| vec![usage])
         .unwrap_or_default();
     parts.push(format!("tools={tool_fingerprint}"));
+    if !active_skills.is_empty() {
+        parts.push(format!("skills={}", active_skills.join(",")));
+    }
     parts.join(", ")
 }
 
@@ -1567,11 +1602,12 @@ mod tests {
                 }),
             },
             "fnv1a64:abc123",
+            &["rust-tutor".to_string()],
         );
 
         assert_eq!(
             rendered,
-            "input=100, output=20, cache_create=30, cache_read=40, tools=fnv1a64:abc123"
+            "input=100, output=20, cache_create=30, cache_read=40, tools=fnv1a64:abc123, skills=rust-tutor"
         );
     }
 
