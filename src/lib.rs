@@ -3,6 +3,7 @@ mod anthropic;
 mod auth;
 pub mod error;
 mod events;
+mod hooks;
 mod ollama;
 mod openai;
 mod policy;
@@ -10,6 +11,7 @@ mod prompt;
 mod provider;
 mod repl;
 pub mod session;
+mod settings;
 mod tools;
 
 pub use error::{Error, Result};

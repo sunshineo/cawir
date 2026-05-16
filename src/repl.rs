@@ -16,6 +16,7 @@ use crate::{
         load_provider_preference, resolve_for_provider, save_api_key, save_provider_preference,
     },
     events::AgentEvent,
+    hooks::HookRegistry,
     ollama::Ollama,
     openai::OpenAi,
     policy::PermissionMode,
@@ -85,6 +86,7 @@ struct CommandContext<'a> {
     credential: &'a mut ActiveCredential,
     model: &'a mut String,
     model_preferences: &'a mut BTreeMap<String, String>,
+    hook_registry: &'a mut HookRegistry,
     client: &'a reqwest::Client,
     session: &'a mut Session,
 }
@@ -102,6 +104,7 @@ struct Runtime {
     client: reqwest::Client,
     command_registry: CommandRegistry,
     tool_registry: ToolRegistry,
+    hook_registry: HookRegistry,
 }
 
 struct ExitCommand;
@@ -331,6 +334,7 @@ pub async fn run() -> Result<()> {
         client,
         command_registry: CommandRegistry::builtins(),
         tool_registry: ToolRegistry::builtins(),
+        hook_registry: HookRegistry::empty(),
     };
     let mut session = resumed_session.unwrap_or_else(|| {
         Session::new(
@@ -341,6 +345,7 @@ pub async fn run() -> Result<()> {
     });
     sync_session_from_runtime(&mut session, &runtime);
     save_session_if_needed(&mut session, is_resuming)?;
+    runtime.hook_registry = HookRegistry::for_project(&session_project_path(&session)?)?;
 
     let mut render = render_agent_event;
     render(AgentEvent::SessionStart {
@@ -380,6 +385,7 @@ pub async fn run() -> Result<()> {
                 credential: &mut runtime.credential,
                 model: &mut runtime.model,
                 model_preferences: &mut runtime.model_preferences,
+                hook_registry: &mut runtime.hook_registry,
                 client: &runtime.client,
                 session: &mut session,
             };
@@ -515,6 +521,10 @@ async fn resume_session(
     )
     .map_err(|error| error.to_string())?;
     *context.session = new_session;
+    *context.hook_registry = HookRegistry::for_project(
+        &session_project_path(context.session).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
 
     println!("resumed session: {}", context.session.id);
     print_active_provider(context.provider, context.credential, context.model);
@@ -636,6 +646,7 @@ async fn run_agent_until_complete(
             project_root: &project_root,
             mode: *mode,
             tool_registry: &runtime.tool_registry,
+            hook_registry: &runtime.hook_registry,
         };
 
         match agent::run_turn(context, history, &mut hooks).await? {

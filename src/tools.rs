@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use crate::{
     Error, Result,
     events::AgentEvent,
+    hooks::{HookAction, HookRegistry},
     policy::{PermissionDecision, PermissionMode, ToolKind, permission_decision},
     provider::ToolDefinition,
     session::{MessageContent, ToolResult},
@@ -585,7 +586,15 @@ where
     F: FnMut(AgentEvent),
 {
     let project_root = std::env::current_dir().expect("test process should have a current dir");
-    execute_tool_uses_in_project(registry, &project_root, blocks, mode, emit)
+    let hook_registry = HookRegistry::empty();
+    execute_tool_uses_in_project_with_hooks(
+        registry,
+        &hook_registry,
+        &project_root,
+        blocks,
+        mode,
+        emit,
+    )
 }
 
 #[cfg(test)]
@@ -599,11 +608,43 @@ fn execute_tool_uses_in_project<F>(
 where
     F: FnMut(AgentEvent),
 {
-    execute_tool_uses_with_approval(registry, project_root, blocks, mode, emit, |_| Ok(true))
+    let hook_registry = HookRegistry::empty();
+    execute_tool_uses_in_project_with_hooks(
+        registry,
+        &hook_registry,
+        project_root,
+        blocks,
+        mode,
+        emit,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn execute_tool_uses_in_project_with_hooks<F>(
+    registry: &ToolRegistry,
+    hook_registry: &HookRegistry,
+    project_root: &Path,
+    blocks: &[MessageContent],
+    mode: PermissionMode,
+    emit: F,
+) -> ToolExecution
+where
+    F: FnMut(AgentEvent),
+{
+    execute_tool_uses_with_approval(
+        registry,
+        hook_registry,
+        project_root,
+        blocks,
+        mode,
+        emit,
+        |_| Ok(true),
+    )
 }
 
 pub(crate) fn execute_tool_uses_with_approval<F, A>(
     registry: &ToolRegistry,
+    hook_registry: &HookRegistry,
     project_root: &Path,
     blocks: &[MessageContent],
     mode: PermissionMode,
@@ -621,56 +662,95 @@ where
         match block {
             MessageContent::Text { .. } => {}
             MessageContent::ToolUse { id, name, input } => {
-                emit(AgentEvent::PreToolUse {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input: input.clone(),
-                });
-                match registry.execute(project_root, name, input, mode, &mut approve) {
+                let input =
+                    match prepare_hooked_tool_input(hook_registry, id, name, input, &mut emit) {
+                        Ok(input) => input,
+                        Err(error) => {
+                            push_tool_error_result(&mut results, &mut emit, id, name, input, error);
+                            continue;
+                        }
+                    };
+
+                match registry.execute(project_root, name, &input, mode, &mut approve) {
                     Ok(ToolOutput::Result(content)) => {
-                        emit(AgentEvent::PostToolUse {
+                        let post_event = AgentEvent::PostToolUse {
                             id: id.clone(),
                             name: name.clone(),
                             input: input.clone(),
                             output_len: content.len(),
                             is_error: false,
                             error: None,
-                        });
-                        results.push(ToolResult {
-                            tool_use_id: id.clone(),
-                            content,
-                            is_error: false,
-                        });
+                        };
+                        match hook_registry.dispatch(&post_event) {
+                            Ok(HookAction::Continue | HookAction::ModifyInput(_)) => {
+                                emit(post_event);
+                                results.push(ToolResult {
+                                    tool_use_id: id.clone(),
+                                    content,
+                                    is_error: false,
+                                });
+                            }
+                            Ok(HookAction::Deny(message)) => push_tool_error_result(
+                                &mut results,
+                                &mut emit,
+                                id,
+                                name,
+                                &input,
+                                Error::ToolDenied {
+                                    tool: name.clone(),
+                                    message,
+                                },
+                            ),
+                            Err(error) => push_tool_error_result(
+                                &mut results,
+                                &mut emit,
+                                id,
+                                name,
+                                &input,
+                                error,
+                            ),
+                        }
                     }
                     Ok(ToolOutput::PlanReady(plan)) => {
-                        emit(AgentEvent::PostToolUse {
+                        let post_event = AgentEvent::PostToolUse {
                             id: id.clone(),
                             name: name.clone(),
                             input: input.clone(),
                             output_len: plan.len(),
                             is_error: false,
                             error: None,
-                        });
-                        plan_ready = Some(PlanReady {
-                            tool_use_id: Some(id.clone()),
-                            plan,
-                        });
+                        };
+                        match hook_registry.dispatch(&post_event) {
+                            Ok(HookAction::Continue | HookAction::ModifyInput(_)) => {
+                                emit(post_event);
+                                plan_ready = Some(PlanReady {
+                                    tool_use_id: Some(id.clone()),
+                                    plan,
+                                });
+                            }
+                            Ok(HookAction::Deny(message)) => push_tool_error_result(
+                                &mut results,
+                                &mut emit,
+                                id,
+                                name,
+                                &input,
+                                Error::ToolDenied {
+                                    tool: name.clone(),
+                                    message,
+                                },
+                            ),
+                            Err(error) => push_tool_error_result(
+                                &mut results,
+                                &mut emit,
+                                id,
+                                name,
+                                &input,
+                                error,
+                            ),
+                        }
                     }
                     Err(error) => {
-                        let content = error.to_string();
-                        emit(AgentEvent::PostToolUse {
-                            id: id.clone(),
-                            name: name.clone(),
-                            input: input.clone(),
-                            output_len: content.len(),
-                            is_error: true,
-                            error: Some(content.clone()),
-                        });
-                        results.push(ToolResult {
-                            tool_use_id: id.clone(),
-                            content,
-                            is_error: true,
-                        });
+                        push_tool_error_result(&mut results, &mut emit, id, name, &input, error);
                     }
                 }
             }
@@ -682,6 +762,71 @@ where
         results,
         plan_ready,
     }
+}
+
+fn prepare_hooked_tool_input<F>(
+    hook_registry: &HookRegistry,
+    id: &str,
+    name: &str,
+    input: &Value,
+    emit: &mut F,
+) -> Result<Value>
+where
+    F: FnMut(AgentEvent),
+{
+    let pre_event = AgentEvent::PreToolUse {
+        id: id.to_string(),
+        name: name.to_string(),
+        input: input.clone(),
+    };
+
+    match hook_registry.dispatch(&pre_event)? {
+        HookAction::Continue => {
+            emit(pre_event);
+            Ok(input.clone())
+        }
+        HookAction::ModifyInput(modified_input) => {
+            emit(AgentEvent::PreToolUse {
+                id: id.to_string(),
+                name: name.to_string(),
+                input: modified_input.clone(),
+            });
+            Ok(modified_input)
+        }
+        HookAction::Deny(message) => {
+            emit(pre_event);
+            Err(Error::ToolDenied {
+                tool: name.to_string(),
+                message,
+            })
+        }
+    }
+}
+
+fn push_tool_error_result<F>(
+    results: &mut Vec<ToolResult>,
+    emit: &mut F,
+    id: &str,
+    name: &str,
+    input: &Value,
+    error: Error,
+) where
+    F: FnMut(AgentEvent),
+{
+    let content = error.to_string();
+    emit(AgentEvent::PostToolUse {
+        id: id.to_string(),
+        name: name.to_string(),
+        input: input.clone(),
+        output_len: content.len(),
+        is_error: true,
+        error: Some(content.clone()),
+    });
+    results.push(ToolResult {
+        tool_use_id: id.to_string(),
+        content,
+        is_error: true,
+    });
 }
 
 #[cfg(test)]

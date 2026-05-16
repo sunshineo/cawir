@@ -4,6 +4,7 @@ use crate::{
     Error, Result,
     auth::ActiveCredential,
     events::{AgentEvent, FailureKind, StopReason},
+    hooks::HookRegistry,
     policy::PermissionMode,
     prompt,
     provider::{Provider, ProviderResponse},
@@ -39,6 +40,7 @@ where
     pub(crate) project_root: &'a Path,
     pub(crate) mode: PermissionMode,
     pub(crate) tool_registry: &'a ToolRegistry,
+    pub(crate) hook_registry: &'a HookRegistry,
 }
 
 pub(crate) fn submit_user_prompt(
@@ -151,6 +153,7 @@ where
 
                 let tool_execution = tools::execute_tool_uses_with_approval(
                     context.tool_registry,
+                    context.hook_registry,
                     context.project_root,
                     &blocks,
                     context.mode,

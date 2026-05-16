@@ -56,6 +56,9 @@ pub enum Error {
     #[error("tool {tool} denied: {message}")]
     ToolDenied { tool: String, message: String },
 
+    #[error("hook {hook} failed: {message}")]
+    Hook { hook: String, message: String },
+
     #[error("tool loop exceeded {0} rounds")]
     ToolLoopLimitExceeded(usize),
 }
