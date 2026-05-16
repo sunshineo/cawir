@@ -8,7 +8,9 @@ use std::{
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::{Error, Result, events::AgentEvent, settings::SettingsResolver};
+use crate::{
+    Error, Result, events::AgentEvent, plugins::PluginCatalog, settings::SettingsResolver,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum HookAction {
@@ -30,6 +32,8 @@ impl HookRegistry {
 
     pub(crate) fn for_project(project_root: &Path) -> Result<Self> {
         let settings = SettingsResolver::for_project(project_root)?.load()?;
+        let plugins = PluginCatalog::from_settings(&settings, project_root)?;
+        let settings = plugins.merged_settings(settings);
         Self::from_settings(&settings, project_root)
     }
 

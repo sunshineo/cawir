@@ -14,7 +14,6 @@ use serde_json::{Value, json};
 use crate::{
     Error, Result,
     policy::ToolKind,
-    settings::SettingsResolver,
     tools::{
         PreparedToolCall, PreparedToolInput, Tool, ToolApprovalRequest, ToolContext, ToolOutput,
         ToolRegistry,
@@ -80,12 +79,12 @@ impl McpServerConfig {
     }
 }
 
-pub(crate) fn register_configured_tools(
+pub(crate) fn register_tools_from_settings(
     registry: &mut ToolRegistry,
+    settings: &Value,
     project_root: &Path,
 ) -> Result<()> {
-    let settings = SettingsResolver::for_project(project_root)?.load()?;
-    for config in McpServerConfig::from_settings(&settings)? {
+    for config in McpServerConfig::from_settings(settings)? {
         let session = McpServerSession::start(config, project_root)?;
         register_session_tools(registry, Arc::new(Mutex::new(session)))?;
     }

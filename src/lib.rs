@@ -7,6 +7,7 @@ mod hooks;
 mod mcp;
 mod ollama;
 mod openai;
+mod plugins;
 mod policy;
 mod prompt;
 mod provider;

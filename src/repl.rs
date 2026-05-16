@@ -20,12 +20,14 @@ use crate::{
     mcp,
     ollama::Ollama,
     openai::OpenAi,
+    plugins::{PluginCatalog, PluginCommandContribution},
     policy::PermissionMode,
     provider::{Provider, ProviderMetadata, ProviderRequest},
     session::{
         Message, MessageContent, Session, current_project_path, is_resumable,
         list_resumable_project_sessions, load_most_recent_session, load_session, save_session,
     },
+    settings::SettingsResolver,
     tools::{ToolApprovalRequest, ToolRegistry},
 };
 
@@ -43,7 +45,7 @@ type CommandFuture<'a> =
     Pin<Box<dyn Future<Output = std::result::Result<CommandOutcome, String>> + 'a>>;
 
 trait Command {
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &str;
     fn run<'a>(&'a self, args: &'a str, context: CommandContext<'a>) -> CommandFuture<'a>;
 }
 
@@ -65,6 +67,33 @@ impl CommandRegistry {
         }
     }
 
+    fn for_project(project_root: &Path) -> Result<Self> {
+        let settings = SettingsResolver::for_project(project_root)?.load()?;
+        let plugins = PluginCatalog::from_settings(&settings, project_root)?;
+        let mut registry = Self::builtins();
+        for command in plugins.commands(project_root)? {
+            registry.register(Box::new(PluginSlashCommand { command }))?;
+        }
+
+        Ok(registry)
+    }
+
+    fn register(&mut self, command: Box<dyn Command>) -> Result<()> {
+        if self
+            .commands
+            .iter()
+            .any(|existing| existing.name() == command.name())
+        {
+            return Err(Error::Env(format!(
+                "duplicate slash command registered: {}",
+                command.name()
+            )));
+        }
+
+        self.commands.push(command);
+        Ok(())
+    }
+
     async fn execute(
         &self,
         input: &str,
@@ -78,6 +107,11 @@ impl CommandRegistry {
         let args = input[command_name.len()..].trim();
 
         Some(command.run(args, context).await)
+    }
+
+    #[cfg(test)]
+    fn names(&self) -> Vec<&str> {
+        self.commands.iter().map(|command| command.name()).collect()
     }
 }
 
@@ -95,6 +129,7 @@ struct CommandContext<'a> {
 enum CommandOutcome {
     Continue,
     Exit,
+    ReloadProjectCommands,
 }
 
 struct Runtime {
@@ -111,7 +146,7 @@ struct Runtime {
 struct ExitCommand;
 
 impl Command for ExitCommand {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "/exit"
     }
 
@@ -129,7 +164,7 @@ impl Command for ExitCommand {
 struct HelpCommand;
 
 impl Command for HelpCommand {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "/help"
     }
 
@@ -148,7 +183,7 @@ impl Command for HelpCommand {
 struct ProviderCommand;
 
 impl Command for ProviderCommand {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "/provider"
     }
 
@@ -171,7 +206,7 @@ impl Command for ProviderCommand {
 struct ModelCommand;
 
 impl Command for ModelCommand {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "/model"
     }
 
@@ -194,7 +229,7 @@ impl Command for ModelCommand {
 struct ModeCommand;
 
 impl Command for ModeCommand {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "/mode"
     }
 
@@ -209,13 +244,34 @@ impl Command for ModeCommand {
 struct ResumeCommand;
 
 impl Command for ResumeCommand {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "/resume"
     }
 
     fn run<'a>(&'a self, args: &'a str, context: CommandContext<'a>) -> CommandFuture<'a> {
         Box::pin(async move {
             resume_session(args, context).await?;
+            Ok(CommandOutcome::ReloadProjectCommands)
+        })
+    }
+}
+
+struct PluginSlashCommand {
+    command: PluginCommandContribution,
+}
+
+impl Command for PluginSlashCommand {
+    fn name(&self) -> &str {
+        &self.command.name
+    }
+
+    fn run<'a>(&'a self, args: &'a str, _context: CommandContext<'a>) -> CommandFuture<'a> {
+        Box::pin(async move {
+            let output = self.command.run(args).map_err(|error| error.to_string())?;
+            if !output.is_empty() {
+                print!("{output}");
+                io::stdout().flush().map_err(|error| error.to_string())?;
+            }
             Ok(CommandOutcome::Continue)
         })
     }
@@ -328,6 +384,7 @@ pub async fn run() -> Result<()> {
         )
     });
     let project_path = session_project_path(&session)?;
+    runtime.command_registry = CommandRegistry::for_project(&project_path)?;
     runtime.tool_registry = tool_registry_for_project(&project_path)?;
     if is_resuming {
         warn_if_tool_fingerprint_changed(&session, &runtime.tool_registry)?;
@@ -390,6 +447,12 @@ pub async fn run() -> Result<()> {
                     sync_session_from_runtime(&mut session, &runtime)?;
                     save_session_if_needed(&mut session, is_resuming)?;
                     break;
+                }
+                Some(Ok(CommandOutcome::ReloadProjectCommands)) => {
+                    let project_path = session_project_path(&session)?;
+                    runtime.command_registry = CommandRegistry::for_project(&project_path)?;
+                    sync_session_from_runtime(&mut session, &runtime)?;
+                    save_session_if_needed(&mut session, is_resuming)?;
                 }
                 Some(Err(error)) => println!("{}", error),
                 None => println!("unknown command: {}", trimmed),
@@ -694,8 +757,12 @@ fn session_project_path(session: &Session) -> Result<PathBuf> {
 }
 
 fn tool_registry_for_project(project_root: &Path) -> Result<ToolRegistry> {
+    let settings = SettingsResolver::for_project(project_root)?.load()?;
+    let plugins = PluginCatalog::from_settings(&settings, project_root)?;
+    let settings = plugins.merged_settings(settings);
     let mut registry = ToolRegistry::builtins();
-    mcp::register_configured_tools(&mut registry, project_root)?;
+    mcp::register_tools_from_settings(&mut registry, &settings, project_root)?;
+    plugins.register_tools(&mut registry, project_root)?;
     Ok(registry)
 }
 
@@ -1351,6 +1418,23 @@ mod tests {
     use crate::provider::TokenUsage;
     use crate::session::is_resumable;
     use serde_json::json;
+    use std::{
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn repl_test_path(prefix: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join("cawir-repl-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(format!("{}-{}-{}", prefix, std::process::id(), unique))
+    }
 
     #[test]
     fn model_preference_key_includes_provider_and_auth_option() {
@@ -1386,6 +1470,42 @@ mod tests {
     #[test]
     fn resume_usage_names_resume_command() {
         assert_eq!(resume_usage(), "usage: /resume <session-id>");
+    }
+
+    #[test]
+    fn command_registry_loads_plugin_slash_commands() {
+        let project = repl_test_path("plugin-command");
+        let plugin = project.join("plugins").join("hello");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::create_dir_all(project.join(".cawir")).unwrap();
+        std::fs::write(
+            project.join(".cawir").join("settings.json"),
+            r#"{
+                "plugins": {
+                    "directories": ["plugins"]
+                }
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            plugin.join(crate::plugins::PLUGIN_MANIFEST_FILE),
+            r#"{
+                "name": "hello",
+                "commands": [
+                    {
+                        "name": "/hello",
+                        "command": "printf hello"
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let registry = CommandRegistry::for_project(&project).unwrap();
+
+        assert!(registry.names().contains(&"/hello"));
+
+        std::fs::remove_dir_all(project).unwrap();
     }
 
     #[test]

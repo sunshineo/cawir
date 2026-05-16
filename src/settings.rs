@@ -57,7 +57,7 @@ fn user_settings_path() -> Result<PathBuf> {
     Ok(dirs.config_dir().join("settings.json"))
 }
 
-fn deep_merge(target: &mut Value, source: Value) {
+pub(crate) fn deep_merge(target: &mut Value, source: Value) {
     match (target, source) {
         (Value::Object(target), Value::Object(source)) => {
             for (key, value) in source {
