@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -6,8 +8,8 @@ use crate::{
     auth::{ActiveCredential, ApiKeyCredential, AuthOption, CodexOAuthCredential, RequestAuth},
     prompt::SystemPrompt,
     provider::{
-        Provider, ProviderMetadata, ProviderResponse, TokenUsage, ToolDefinition,
-        api_error_from_response,
+        Provider, ProviderEvent, ProviderMetadata, ProviderRequest, ProviderResponse, TokenUsage,
+        ToolDefinition, api_error_from_response, read_sse_data_events,
     },
     session::{Message, MessageContent},
 };
@@ -40,6 +42,13 @@ struct ChatRequest {
     model: String,
     messages: Vec<OpenAiMessage>,
     tools: Vec<OpenAiTool>,
+    stream: bool,
+    stream_options: ChatStreamOptions,
+}
+
+#[derive(Serialize, Debug, PartialEq, Eq)]
+struct ChatStreamOptions {
+    include_usage: bool,
 }
 
 #[derive(Serialize)]
@@ -138,6 +147,7 @@ struct ResponsesTool {
     parameters: Value,
 }
 
+#[cfg(test)]
 #[derive(Deserialize, Debug)]
 struct ChatResponse {
     choices: Vec<Choice>,
@@ -149,6 +159,22 @@ struct ResponsesStreamAccumulator {
     output: Vec<ResponsesItem>,
     text_delta: String,
     metadata: ProviderMetadata,
+    function_call_ids_by_item_id: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Default)]
+struct ChatStreamAccumulator {
+    text_delta: String,
+    tool_calls: BTreeMap<usize, ChatStreamToolCall>,
+    metadata: ProviderMetadata,
+}
+
+#[derive(Debug, Default)]
+struct ChatStreamToolCall {
+    id: Option<String>,
+    name: Option<String>,
+    arguments: String,
+    emitted_start: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -158,22 +184,58 @@ struct ResponsesStreamResponse {
 }
 
 #[derive(Deserialize, Debug)]
+struct ChatStreamChunk {
+    #[serde(default)]
+    choices: Vec<ChatStreamChoice>,
+    usage: Option<ChatUsage>,
+    error: Option<Value>,
+}
+
+#[derive(Deserialize, Debug)]
+struct ChatStreamChoice {
+    delta: ChatStreamDelta,
+}
+
+#[derive(Deserialize, Debug, Default)]
+struct ChatStreamDelta {
+    content: Option<String>,
+    tool_calls: Option<Vec<ChatStreamToolCallDelta>>,
+}
+
+#[derive(Deserialize, Debug)]
+struct ChatStreamToolCallDelta {
+    index: usize,
+    id: Option<String>,
+    function: Option<ChatStreamToolCallFunctionDelta>,
+}
+
+#[derive(Deserialize, Debug)]
+struct ChatStreamToolCallFunctionDelta {
+    name: Option<String>,
+    arguments: Option<String>,
+}
+
+#[cfg(test)]
+#[derive(Deserialize, Debug)]
 struct Choice {
     message: AssistantMessage,
 }
 
+#[cfg(test)]
 #[derive(Deserialize, Debug)]
 struct AssistantMessage {
     content: Option<String>,
     tool_calls: Option<Vec<ResponseToolCall>>,
 }
 
+#[cfg(test)]
 #[derive(Deserialize, Debug)]
 struct ResponseToolCall {
     id: String,
     function: ResponseToolCallFunction,
 }
 
+#[cfg(test)]
 #[derive(Deserialize, Debug)]
 struct ResponseToolCallFunction {
     name: String,
@@ -274,29 +336,24 @@ impl Provider for OpenAi {
         }
     }
 
-    async fn send(
-        &self,
-        client: &reqwest::Client,
-        credential: &ActiveCredential,
-        model: &str,
-        prompt: &SystemPrompt,
-        messages: &[Message],
-        tools: Vec<ToolDefinition>,
-    ) -> Result<ProviderResponse> {
-        if credential.option_name() == "codex-oauth" {
-            return self
-                .send_codex_oauth(client, credential, model, prompt, messages, tools)
-                .await;
+    async fn send(&self, request: ProviderRequest<'_>) -> Result<ProviderResponse> {
+        if request.credential.option_name() == "codex-oauth" {
+            return self.send_codex_oauth(request).await;
         }
 
         let req = ChatRequest {
-            model: model.to_string(),
-            messages: to_openai_messages(prompt, messages),
-            tools: tools.into_iter().map(OpenAiTool::from).collect(),
+            model: request.model.to_string(),
+            messages: to_openai_messages(request.prompt, request.messages),
+            tools: request.tools.into_iter().map(OpenAiTool::from).collect(),
+            stream: true,
+            stream_options: ChatStreamOptions {
+                include_usage: true,
+            },
         };
 
-        let response = credential
-            .attach(client.post(OPENAI_CHAT_COMPLETIONS_URL))
+        let response = request
+            .credential
+            .attach(request.client.post(OPENAI_CHAT_COMPLETIONS_URL))
             .header("content-type", "application/json")
             .json(&req)
             .send()
@@ -306,26 +363,12 @@ impl Provider for OpenAi {
             return Err(api_error_from_response(self.name(), response).await);
         }
 
-        let parsed: ChatResponse = response.json().await?;
-        let metadata = parsed.metadata();
-        let Some(choice) = parsed.choices.into_iter().next() else {
-            return Err(Error::EmptyContent(self.name().to_string()));
-        };
-
-        let blocks = to_message_content(choice.message);
-        if blocks
-            .iter()
-            .any(|block| matches!(block, MessageContent::ToolUse { .. }))
-        {
-            return Ok(ProviderResponse::tool_use(blocks, metadata));
-        }
-
-        let reply = render_text_blocks(&blocks);
-        if reply.is_empty() {
-            return Err(Error::EmptyContent(self.name().to_string()));
-        }
-
-        Ok(ProviderResponse::text(reply, metadata))
+        let mut accumulator = ChatStreamAccumulator::default();
+        read_sse_data_events(response, |event| {
+            accumulator.handle_data_event(event, request.events)
+        })
+        .await?;
+        accumulator.finish()
     }
 }
 
@@ -355,20 +398,12 @@ impl OpenAi {
         Ok(models)
     }
 
-    async fn send_codex_oauth(
-        &self,
-        client: &reqwest::Client,
-        credential: &ActiveCredential,
-        model: &str,
-        prompt: &SystemPrompt,
-        messages: &[Message],
-        tools: Vec<ToolDefinition>,
-    ) -> Result<ProviderResponse> {
+    async fn send_codex_oauth(&self, request: ProviderRequest<'_>) -> Result<ProviderResponse> {
         let req = ResponsesRequest {
-            model: model.to_string(),
-            instructions: prompt.render_text(),
-            input: to_responses_items(messages),
-            tools: tools.into_iter().map(ResponsesTool::from).collect(),
+            model: request.model.to_string(),
+            instructions: request.prompt.render_text(),
+            input: to_responses_items(request.messages),
+            tools: request.tools.into_iter().map(ResponsesTool::from).collect(),
             tool_choice: "auto".to_string(),
             parallel_tool_calls: false,
             store: false,
@@ -376,8 +411,9 @@ impl OpenAi {
             include: Vec::new(),
         };
 
-        let response = credential
-            .attach(client.post(CHATGPT_CODEX_RESPONSES_URL))
+        let response = request
+            .credential
+            .attach(request.client.post(CHATGPT_CODEX_RESPONSES_URL))
             .header("accept", "text/event-stream")
             .header("content-type", "application/json")
             .json(&req)
@@ -388,8 +424,12 @@ impl OpenAi {
             return Err(api_error_from_response(self.name(), response).await);
         }
 
-        let body = response.text().await?;
-        let response = responses_stream_to_message_content(&body)?;
+        let mut accumulator = ResponsesStreamAccumulator::default();
+        read_sse_data_events(response, |event| {
+            accumulator.handle_data_event(event, request.events)
+        })
+        .await?;
+        let response = accumulator.finish();
         if response
             .blocks
             .iter()
@@ -410,6 +450,7 @@ impl OpenAi {
     }
 }
 
+#[cfg(test)]
 impl ChatResponse {
     fn metadata(&self) -> ProviderMetadata {
         ProviderMetadata::from_usage(
@@ -675,6 +716,7 @@ fn assistant_message(message: &Message) -> Vec<OpenAiMessage> {
     }
 }
 
+#[cfg(test)]
 fn to_message_content(message: AssistantMessage) -> Vec<MessageContent> {
     let mut blocks = Vec::new();
 
@@ -732,12 +774,146 @@ fn responses_output_to_message_content(output: Vec<ResponsesItem>) -> Vec<Messag
         .collect()
 }
 
-fn responses_stream_to_message_content(body: &str) -> Result<ResponsesStreamResponse> {
-    let mut accumulator = ResponsesStreamAccumulator::default();
-
-    for event in parse_sse_data_events(body) {
+impl ChatStreamAccumulator {
+    fn handle_data_event(
+        &mut self,
+        event: String,
+        emit: &mut dyn FnMut(ProviderEvent),
+    ) -> Result<()> {
         if event == "[DONE]" {
-            continue;
+            return Ok(());
+        }
+
+        let chunk: ChatStreamChunk = serde_json::from_str(&event).map_err(|error| {
+            Error::Env(format!("failed to parse OpenAI chat stream event: {error}"))
+        })?;
+        if let Some(error) = chunk.error {
+            return Err(Error::Env(format!("OpenAI chat stream failed: {error}")));
+        }
+        if let Some(usage) = chunk.usage {
+            self.metadata = ProviderMetadata::from_usage(usage.token_usage());
+        }
+
+        for choice in chunk.choices {
+            if let Some(content) = choice.delta.content
+                && !content.is_empty()
+            {
+                emit(ProviderEvent::TextDelta {
+                    text: content.clone(),
+                });
+                self.text_delta.push_str(&content);
+            }
+
+            if let Some(tool_calls) = choice.delta.tool_calls {
+                for delta in tool_calls {
+                    self.apply_tool_delta(delta, emit);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn apply_tool_delta(
+        &mut self,
+        delta: ChatStreamToolCallDelta,
+        emit: &mut dyn FnMut(ProviderEvent),
+    ) {
+        let tool_call = self.tool_calls.entry(delta.index).or_default();
+        if let Some(id) = delta.id {
+            tool_call.id = Some(id);
+        }
+        let mut argument_delta = None;
+        if let Some(function) = delta.function {
+            if let Some(name) = function.name {
+                tool_call.name = Some(name);
+            }
+            if let Some(arguments) = function.arguments {
+                argument_delta = Some(arguments);
+            }
+        }
+
+        if !tool_call.emitted_start
+            && let (Some(id), Some(name)) = (&tool_call.id, &tool_call.name)
+        {
+            emit(ProviderEvent::ToolUseStart {
+                id: id.clone(),
+                name: name.clone(),
+            });
+            tool_call.emitted_start = true;
+        }
+
+        if let Some(arguments) = argument_delta {
+            if let Some(id) = &tool_call.id {
+                emit(ProviderEvent::ToolUseInputDelta {
+                    id: id.clone(),
+                    partial_json: arguments.clone(),
+                });
+            }
+            tool_call.arguments.push_str(&arguments);
+        }
+    }
+
+    fn finish(self) -> Result<ProviderResponse> {
+        let metadata = self.metadata.clone();
+        let blocks = self.into_message_content();
+        if blocks
+            .iter()
+            .any(|block| matches!(block, MessageContent::ToolUse { .. }))
+        {
+            return Ok(ProviderResponse::tool_use(blocks, metadata));
+        }
+
+        let reply = render_text_blocks(&blocks);
+        if reply.is_empty() {
+            return Err(Error::EmptyContent("openai".to_string()));
+        }
+
+        Ok(ProviderResponse::text(reply, metadata))
+    }
+
+    fn into_message_content(self) -> Vec<MessageContent> {
+        let mut blocks = Vec::new();
+
+        if !self.text_delta.is_empty() {
+            blocks.push(MessageContent::Text {
+                text: self.text_delta,
+            });
+        }
+
+        blocks.extend(
+            self.tool_calls
+                .into_values()
+                .filter_map(ChatStreamToolCall::into_message_content),
+        );
+
+        blocks
+    }
+}
+
+impl ChatStreamToolCall {
+    fn into_message_content(self) -> Option<MessageContent> {
+        let id = self.id?;
+        let name = self.name?;
+        let input = if self.arguments.trim().is_empty() {
+            json!({})
+        } else {
+            serde_json::from_str(&self.arguments)
+                .unwrap_or_else(|_| json!({ "raw_arguments": self.arguments }))
+        };
+
+        Some(MessageContent::ToolUse { id, name, input })
+    }
+}
+
+impl ResponsesStreamAccumulator {
+    fn handle_data_event(
+        &mut self,
+        event: String,
+        emit: &mut dyn FnMut(ProviderEvent),
+    ) -> Result<()> {
+        if event == "[DONE]" {
+            return Ok(());
         }
 
         let value: Value = serde_json::from_str(&event).map_err(|error| {
@@ -750,15 +926,57 @@ fn responses_stream_to_message_content(body: &str) -> Result<ResponsesStreamResp
 
         match event_type {
             "response.output_text.delta" => {
-                if let Some(delta) = value.get("delta").and_then(Value::as_str) {
-                    accumulator.text_delta.push_str(delta);
+                if let Some(delta) = value.get("delta").and_then(Value::as_str)
+                    && !delta.is_empty()
+                {
+                    emit(ProviderEvent::TextDelta {
+                        text: delta.to_string(),
+                    });
+                    self.text_delta.push_str(delta);
+                }
+            }
+            "response.output_item.added" => {
+                if let Some(item) = value.get("item")
+                    && item.get("type").and_then(Value::as_str) == Some("function_call")
+                {
+                    let item_id = item.get("id").and_then(Value::as_str);
+                    let call_id = item.get("call_id").and_then(Value::as_str).or(item_id);
+                    if let (Some(item_id), Some(call_id)) = (item_id, call_id) {
+                        self.function_call_ids_by_item_id
+                            .insert(item_id.to_string(), call_id.to_string());
+                    }
+                    if let (Some(call_id), Some(name)) =
+                        (call_id, item.get("name").and_then(Value::as_str))
+                    {
+                        emit(ProviderEvent::ToolUseStart {
+                            id: call_id.to_string(),
+                            name: name.to_string(),
+                        });
+                    }
+                }
+            }
+            "response.function_call_arguments.delta" => {
+                let call_id = value.get("call_id").and_then(Value::as_str).or_else(|| {
+                    value
+                        .get("item_id")
+                        .and_then(Value::as_str)
+                        .and_then(|item_id| self.function_call_ids_by_item_id.get(item_id))
+                        .map(String::as_str)
+                });
+                if let (Some(call_id), Some(delta)) =
+                    (call_id, value.get("delta").and_then(Value::as_str))
+                {
+                    emit(ProviderEvent::ToolUseInputDelta {
+                        id: call_id.to_string(),
+                        partial_json: delta.to_string(),
+                    });
                 }
             }
             "response.output_item.done" => {
                 if let Some(item) = value.get("item")
                     && let Ok(item) = serde_json::from_value::<ResponsesItem>(item.clone())
                 {
-                    accumulator.output.push(item);
+                    self.output.push(item);
                 }
             }
             "response.completed" => {
@@ -767,7 +985,7 @@ fn responses_stream_to_message_content(body: &str) -> Result<ResponsesStreamResp
                     .and_then(|response| response.get("usage"))
                     && let Ok(usage) = serde_json::from_value::<ResponsesUsage>(usage.clone())
                 {
-                    accumulator.metadata = ProviderMetadata::from_usage(usage.token_usage());
+                    self.metadata = ProviderMetadata::from_usage(usage.token_usage());
                 }
             }
             "response.failed" | "response.incomplete" => {
@@ -775,37 +993,59 @@ fn responses_stream_to_message_content(body: &str) -> Result<ResponsesStreamResp
             }
             _ => {}
         }
+
+        Ok(())
     }
 
-    let blocks = responses_output_to_message_content(accumulator.output);
-    if blocks.is_empty() && !accumulator.text_delta.is_empty() {
-        Ok(ResponsesStreamResponse {
-            blocks: vec![MessageContent::Text {
-                text: accumulator.text_delta,
-            }],
-            metadata: accumulator.metadata,
-        })
-    } else {
-        Ok(ResponsesStreamResponse {
-            blocks,
-            metadata: accumulator.metadata,
-        })
+    fn finish(self) -> ResponsesStreamResponse {
+        let blocks = responses_output_to_message_content(self.output);
+        if blocks.is_empty() && !self.text_delta.is_empty() {
+            ResponsesStreamResponse {
+                blocks: vec![MessageContent::Text {
+                    text: self.text_delta,
+                }],
+                metadata: self.metadata,
+            }
+        } else {
+            ResponsesStreamResponse {
+                blocks,
+                metadata: self.metadata,
+            }
+        }
     }
 }
 
-fn parse_sse_data_events(body: &str) -> Vec<String> {
-    body.split("\n\n")
-        .filter_map(|event| {
-            let data = event
-                .lines()
-                .filter_map(|line| line.strip_prefix("data:"))
-                .map(str::trim_start)
-                .collect::<Vec<_>>()
-                .join("\n");
+#[cfg(test)]
+fn chat_stream_events_to_response(
+    events: impl IntoIterator<Item = String>,
+    emit: &mut dyn FnMut(ProviderEvent),
+) -> Result<ProviderResponse> {
+    let mut accumulator = ChatStreamAccumulator::default();
+    for event in events {
+        accumulator.handle_data_event(event, emit)?;
+    }
+    accumulator.finish()
+}
 
-            (!data.is_empty()).then_some(data)
-        })
-        .collect()
+#[cfg(test)]
+fn responses_stream_events_to_response(
+    events: impl IntoIterator<Item = String>,
+    emit: &mut dyn FnMut(ProviderEvent),
+) -> Result<ResponsesStreamResponse> {
+    let mut accumulator = ResponsesStreamAccumulator::default();
+    for event in events {
+        accumulator.handle_data_event(event, emit)?;
+    }
+    Ok(accumulator.finish())
+}
+
+#[cfg(test)]
+fn responses_stream_to_message_content(body: &str) -> Result<ResponsesStreamResponse> {
+    let mut ignore_events = |_event: ProviderEvent| {};
+    responses_stream_events_to_response(
+        crate::provider::parse_sse_data_events(body),
+        &mut ignore_events,
+    )
 }
 
 fn render_text_blocks(blocks: &[MessageContent]) -> String {
@@ -823,7 +1063,7 @@ fn render_text_blocks(blocks: &[MessageContent]) -> String {
 mod tests {
     use super::*;
     use crate::prompt::{PromptSection, SystemPrompt};
-    use crate::provider::{ProviderMetadata, TokenUsage};
+    use crate::provider::{ProviderEvent, ProviderMetadata, TokenUsage};
 
     #[test]
     fn converts_tool_definition_to_openai_function_tool() {
@@ -1084,6 +1324,27 @@ mod tests {
         assert_eq!(serialized["stream"], true);
     }
 
+    #[test]
+    fn chat_completions_request_enables_streaming_and_usage() {
+        let req = ChatRequest {
+            model: DEFAULT_MODEL.to_string(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            stream: true,
+            stream_options: ChatStreamOptions {
+                include_usage: true,
+            },
+        };
+
+        let serialized = serde_json::to_value(req).unwrap();
+
+        assert_eq!(serialized["stream"], true);
+        assert_eq!(
+            serialized["stream_options"],
+            json!({ "include_usage": true })
+        );
+    }
+
     fn test_prompt() -> SystemPrompt {
         SystemPrompt {
             sections: vec![PromptSection {
@@ -1162,6 +1423,166 @@ mod tests {
                     cache_read_input_tokens: None,
                 })
             }
+        );
+    }
+
+    #[test]
+    fn parses_chat_completions_stream_text_and_tool_deltas() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_123\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"Cargo.toml\\\"}\"}}]}}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":4}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let mut events = Vec::new();
+
+        let response = chat_stream_events_to_response(
+            crate::provider::parse_sse_data_events(body),
+            &mut |event| events.push(event),
+        )
+        .unwrap();
+
+        assert_eq!(
+            events,
+            vec![
+                ProviderEvent::TextDelta {
+                    text: "hel".to_string()
+                },
+                ProviderEvent::TextDelta {
+                    text: "lo".to_string()
+                },
+                ProviderEvent::ToolUseStart {
+                    id: "call_123".to_string(),
+                    name: "read_file".to_string(),
+                },
+                ProviderEvent::ToolUseInputDelta {
+                    id: "call_123".to_string(),
+                    partial_json: "{\"path\":".to_string(),
+                },
+                ProviderEvent::ToolUseInputDelta {
+                    id: "call_123".to_string(),
+                    partial_json: "\"Cargo.toml\"}".to_string(),
+                },
+            ]
+        );
+        assert_eq!(
+            response,
+            ProviderResponse::tool_use(
+                vec![
+                    MessageContent::Text {
+                        text: "hello".to_string()
+                    },
+                    MessageContent::ToolUse {
+                        id: "call_123".to_string(),
+                        name: "read_file".to_string(),
+                        input: json!({ "path": "Cargo.toml" })
+                    }
+                ],
+                ProviderMetadata {
+                    usage: Some(TokenUsage {
+                        input_tokens: Some(10),
+                        output_tokens: Some(4),
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: None,
+                    })
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn parses_responses_stream_text_delta_events() {
+        let body = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hel\"}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":22,\"output_tokens\":3}}}\n\n",
+        );
+        let mut events = Vec::new();
+
+        let response = responses_stream_events_to_response(
+            crate::provider::parse_sse_data_events(body),
+            &mut |event| events.push(event),
+        )
+        .unwrap();
+
+        assert_eq!(
+            events,
+            vec![
+                ProviderEvent::TextDelta {
+                    text: "hel".to_string()
+                },
+                ProviderEvent::TextDelta {
+                    text: "lo".to_string()
+                },
+            ]
+        );
+        assert_eq!(
+            response,
+            ResponsesStreamResponse {
+                blocks: vec![MessageContent::Text {
+                    text: "hello".to_string()
+                }],
+                metadata: ProviderMetadata {
+                    usage: Some(TokenUsage {
+                        input_tokens: Some(22),
+                        output_tokens: Some(3),
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: None,
+                    })
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_responses_stream_tool_use_deltas_by_item_id() {
+        let body = concat!(
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_123\",\"type\":\"function_call\",\"call_id\":\"call_123\",\"name\":\"read_file\",\"arguments\":\"\"}}\n\n",
+            "event: response.function_call_arguments.delta\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_123\",\"delta\":\"{\\\"path\\\":\"}\n\n",
+            "event: response.function_call_arguments.delta\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_123\",\"delta\":\"\\\"Cargo.toml\\\"}\"}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"fc_123\",\"type\":\"function_call\",\"call_id\":\"call_123\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"Cargo.toml\\\"}\"}}\n\n",
+        );
+        let mut events = Vec::new();
+
+        let response = responses_stream_events_to_response(
+            crate::provider::parse_sse_data_events(body),
+            &mut |event| events.push(event),
+        )
+        .unwrap();
+
+        assert_eq!(
+            events,
+            vec![
+                ProviderEvent::ToolUseStart {
+                    id: "call_123".to_string(),
+                    name: "read_file".to_string(),
+                },
+                ProviderEvent::ToolUseInputDelta {
+                    id: "call_123".to_string(),
+                    partial_json: "{\"path\":".to_string(),
+                },
+                ProviderEvent::ToolUseInputDelta {
+                    id: "call_123".to_string(),
+                    partial_json: "\"Cargo.toml\"}".to_string(),
+                },
+            ]
+        );
+        assert_eq!(
+            response.blocks,
+            vec![MessageContent::ToolUse {
+                id: "call_123".to_string(),
+                name: "read_file".to_string(),
+                input: json!({ "path": "Cargo.toml" })
+            }]
         );
     }
 }

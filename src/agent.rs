@@ -7,7 +7,7 @@ use crate::{
     hooks::HookRegistry,
     policy::PermissionMode,
     prompt,
-    provider::{Provider, ProviderResponse},
+    provider::{Provider, ProviderEvent, ProviderRequest, ProviderResponse},
     session::{Message, MessageContent},
     tools::{self, PlanReady, ToolApprovalRequest, ToolRegistry},
 };
@@ -83,18 +83,26 @@ where
             }
         };
 
-        let response = match context
-            .provider
-            .send(
-                context.client,
-                context.credential,
-                context.model,
-                &prompt,
-                history,
-                context.tool_registry.definitions(context.mode),
-            )
-            .await
-        {
+        let response = {
+            let provider_name = context.provider.name().to_string();
+            let emit = &mut *hooks.emit;
+            let mut provider_events =
+                |event| emit(provider_event_to_agent_event(&provider_name, event));
+
+            context
+                .provider
+                .send(ProviderRequest {
+                    client: context.client,
+                    credential: context.credential,
+                    model: context.model,
+                    prompt: &prompt,
+                    messages: history,
+                    tools: context.tool_registry.definitions(context.mode),
+                    events: &mut provider_events,
+                })
+                .await
+        };
+        let response = match response {
             Ok(response) => response,
             Err(error) => {
                 (hooks.emit)(AgentEvent::stop_failure(
@@ -174,6 +182,27 @@ where
                     return Ok(TurnOutcome::PlanReady(plan_ready));
                 }
                 history.push(Message::user_tool_results(tool_execution.results));
+            }
+        }
+    }
+}
+
+fn provider_event_to_agent_event(provider: &str, event: ProviderEvent) -> AgentEvent {
+    match event {
+        ProviderEvent::TextDelta { text } => AgentEvent::AssistantTextDelta {
+            provider: provider.to_string(),
+            text,
+        },
+        ProviderEvent::ToolUseStart { id, name } => AgentEvent::AssistantToolUseStart {
+            provider: provider.to_string(),
+            id,
+            name,
+        },
+        ProviderEvent::ToolUseInputDelta { id, partial_json } => {
+            AgentEvent::AssistantToolUseInputDelta {
+                provider: provider.to_string(),
+                id,
+                partial_json,
             }
         }
     }

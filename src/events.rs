@@ -61,6 +61,20 @@ pub(crate) enum AgentEvent {
         provider: String,
         text: String,
     },
+    AssistantTextDelta {
+        provider: String,
+        text: String,
+    },
+    AssistantToolUseStart {
+        provider: String,
+        id: String,
+        name: String,
+    },
+    AssistantToolUseInputDelta {
+        provider: String,
+        id: String,
+        partial_json: String,
+    },
     Stop {
         reason: StopReason,
     },
@@ -161,6 +175,25 @@ mod tests {
                 "output_len": 26,
                 "is_error": false,
                 "error": null
+            })
+        );
+    }
+
+    #[test]
+    fn assistant_text_delta_serializes_for_streaming_surfaces() {
+        let event = AgentEvent::AssistantTextDelta {
+            provider: "anthropic".to_string(),
+            text: "hel".to_string(),
+        };
+
+        let value = serde_json::to_value(event).unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "type": "assistant_text_delta",
+                "provider": "anthropic",
+                "text": "hel"
             })
         );
     }

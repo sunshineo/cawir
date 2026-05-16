@@ -8,7 +8,7 @@ use crate::{
     auth::{ActiveCredential, AuthOption},
     prompt::SystemPrompt,
     provider::{
-        Provider, ProviderMetadata, ProviderResponse, TokenUsage, ToolDefinition,
+        Provider, ProviderMetadata, ProviderRequest, ProviderResponse, TokenUsage, ToolDefinition,
         api_error_from_response,
     },
     session::{Message, MessageContent},
@@ -125,25 +125,18 @@ impl Provider for Ollama {
         FALLBACK_MODELS
     }
 
-    async fn send(
-        &self,
-        client: &reqwest::Client,
-        credential: &ActiveCredential,
-        model: &str,
-        prompt: &SystemPrompt,
-        messages: &[Message],
-        tools: Vec<ToolDefinition>,
-    ) -> Result<ProviderResponse> {
+    async fn send(&self, request: ProviderRequest<'_>) -> Result<ProviderResponse> {
         let req = ChatRequest {
-            model: model.to_string(),
-            messages: to_ollama_messages(prompt, messages),
-            tools: tools.into_iter().map(OllamaTool::from).collect(),
+            model: request.model.to_string(),
+            messages: to_ollama_messages(request.prompt, request.messages),
+            tools: request.tools.into_iter().map(OllamaTool::from).collect(),
             stream: false,
             think: true,
         };
 
-        let response = credential
-            .attach(client.post(OLLAMA_CHAT_URL))
+        let response = request
+            .credential
+            .attach(request.client.post(OLLAMA_CHAT_URL))
             .header("content-type", "application/json")
             .json(&req)
             .send()

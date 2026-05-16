@@ -1,3 +1,4 @@
+use futures_util::StreamExt;
 use reqwest::{
     StatusCode,
     header::{HeaderMap, RETRY_AFTER},
@@ -17,6 +18,13 @@ pub(crate) struct ToolDefinition {
     pub(crate) name: String,
     pub(crate) description: String,
     pub(crate) input_schema: serde_json::Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ProviderEvent {
+    TextDelta { text: String },
+    ToolUseStart { id: String, name: String },
+    ToolUseInputDelta { id: String, partial_json: String },
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -59,6 +67,7 @@ impl TokenUsage {
     }
 }
 
+#[derive(Debug, PartialEq)]
 pub(crate) enum ProviderResponse {
     Text {
         text: String,
@@ -68,6 +77,16 @@ pub(crate) enum ProviderResponse {
         blocks: Vec<MessageContent>,
         metadata: ProviderMetadata,
     },
+}
+
+pub(crate) struct ProviderRequest<'a> {
+    pub(crate) client: &'a reqwest::Client,
+    pub(crate) credential: &'a ActiveCredential,
+    pub(crate) model: &'a str,
+    pub(crate) prompt: &'a SystemPrompt,
+    pub(crate) messages: &'a [Message],
+    pub(crate) tools: Vec<ToolDefinition>,
+    pub(crate) events: &'a mut dyn FnMut(ProviderEvent),
 }
 
 impl ProviderResponse {
@@ -101,15 +120,76 @@ pub(crate) trait Provider {
 
     fn fallback_models(&self, credential: &ActiveCredential) -> &'static [&'static str];
 
-    async fn send(
-        &self,
-        client: &reqwest::Client,
-        credential: &ActiveCredential,
-        model: &str,
-        prompt: &SystemPrompt,
-        messages: &[Message],
-        tools: Vec<ToolDefinition>,
-    ) -> Result<ProviderResponse>;
+    async fn send(&self, request: ProviderRequest<'_>) -> Result<ProviderResponse>;
+}
+
+pub(crate) async fn read_sse_data_events(
+    response: reqwest::Response,
+    mut on_event: impl FnMut(String) -> Result<()>,
+) -> Result<()> {
+    let mut buffer = Vec::new();
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        buffer.extend_from_slice(&chunk?);
+
+        while let Some((index, delimiter_len)) = find_sse_delimiter(&buffer) {
+            let event = buffer.drain(..index).collect::<Vec<_>>();
+            buffer.drain(..delimiter_len);
+            if let Some(data) = parse_sse_data_event_bytes(&event)? {
+                on_event(data)?;
+            }
+        }
+    }
+
+    if !buffer.iter().all(u8::is_ascii_whitespace)
+        && let Some(data) = parse_sse_data_event_bytes(&buffer)?
+    {
+        on_event(data)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn parse_sse_data_events(body: &str) -> Vec<String> {
+    body.split("\n\n")
+        .filter_map(parse_sse_data_event)
+        .collect()
+}
+
+fn parse_sse_data_event_bytes(event: &[u8]) -> Result<Option<String>> {
+    let event = std::str::from_utf8(event)
+        .map_err(|error| Error::Env(format!("failed to decode SSE event as UTF-8: {error}")))?;
+
+    Ok(parse_sse_data_event(event))
+}
+
+fn parse_sse_data_event(event: &str) -> Option<String> {
+    let data = event
+        .lines()
+        .filter_map(|line| line.trim_end_matches('\r').strip_prefix("data:"))
+        .map(str::trim_start)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    (!data.is_empty()).then_some(data)
+}
+
+fn find_sse_delimiter(buffer: &[u8]) -> Option<(usize, usize)> {
+    for (index, window) in buffer.windows(2).enumerate() {
+        if window == b"\n\n" {
+            return Some((index, 2));
+        }
+    }
+
+    for (index, window) in buffer.windows(4).enumerate() {
+        if window == b"\r\n\r\n" {
+            return Some((index, 4));
+        }
+    }
+
+    None
 }
 
 pub(crate) async fn api_error_from_response(provider: &str, response: reqwest::Response) -> Error {
@@ -242,6 +322,7 @@ mod tests {
             .build()?;
         let messages = live_smoke_messages();
         let prompt = crate::prompt::assemble(&std::env::current_dir()?)?;
+        let mut ignore_events = |_event: ProviderEvent| {};
 
         let response = match provider.as_str() {
             "anthropic" => {
@@ -254,14 +335,15 @@ mod tests {
                 )
                 .await?;
                 provider
-                    .send(
-                        &client,
-                        &credential,
-                        provider.default_model(&credential),
-                        &prompt,
-                        &messages,
-                        Vec::new(),
-                    )
+                    .send(ProviderRequest {
+                        client: &client,
+                        credential: &credential,
+                        model: provider.default_model(&credential),
+                        prompt: &prompt,
+                        messages: &messages,
+                        tools: Vec::new(),
+                        events: &mut ignore_events,
+                    })
                     .await?
             }
             "openai" => {
@@ -274,14 +356,15 @@ mod tests {
                 )
                 .await?;
                 provider
-                    .send(
-                        &client,
-                        &credential,
-                        provider.default_model(&credential),
-                        &prompt,
-                        &messages,
-                        Vec::new(),
-                    )
+                    .send(ProviderRequest {
+                        client: &client,
+                        credential: &credential,
+                        model: provider.default_model(&credential),
+                        prompt: &prompt,
+                        messages: &messages,
+                        tools: Vec::new(),
+                        events: &mut ignore_events,
+                    })
                     .await?
             }
             "ollama" => {
@@ -294,14 +377,15 @@ mod tests {
                 )
                 .await?;
                 provider
-                    .send(
-                        &client,
-                        &credential,
-                        provider.default_model(&credential),
-                        &prompt,
-                        &messages,
-                        Vec::new(),
-                    )
+                    .send(ProviderRequest {
+                        client: &client,
+                        credential: &credential,
+                        model: provider.default_model(&credential),
+                        prompt: &prompt,
+                        messages: &messages,
+                        tools: Vec::new(),
+                        events: &mut ignore_events,
+                    })
                     .await?
             }
             other => {
@@ -326,6 +410,7 @@ mod tests {
             .build()?;
         let messages = live_smoke_messages();
         let prompt = crate::prompt::assemble(&std::env::current_dir()?)?;
+        let mut ignore_events = |_event: ProviderEvent| {};
 
         let response = match provider.as_str() {
             "anthropic" => {
@@ -339,7 +424,15 @@ mod tests {
                 .await?;
                 let model = selected_live_model(&provider, &client, &credential).await?;
                 provider
-                    .send(&client, &credential, &model, &prompt, &messages, Vec::new())
+                    .send(ProviderRequest {
+                        client: &client,
+                        credential: &credential,
+                        model: &model,
+                        prompt: &prompt,
+                        messages: &messages,
+                        tools: Vec::new(),
+                        events: &mut ignore_events,
+                    })
                     .await?
             }
             "openai" => {
@@ -353,7 +446,15 @@ mod tests {
                 .await?;
                 let model = selected_live_model(&provider, &client, &credential).await?;
                 provider
-                    .send(&client, &credential, &model, &prompt, &messages, Vec::new())
+                    .send(ProviderRequest {
+                        client: &client,
+                        credential: &credential,
+                        model: &model,
+                        prompt: &prompt,
+                        messages: &messages,
+                        tools: Vec::new(),
+                        events: &mut ignore_events,
+                    })
                     .await?
             }
             "ollama" => {
@@ -367,7 +468,15 @@ mod tests {
                 .await?;
                 let model = selected_live_model(&provider, &client, &credential).await?;
                 provider
-                    .send(&client, &credential, &model, &prompt, &messages, Vec::new())
+                    .send(ProviderRequest {
+                        client: &client,
+                        credential: &credential,
+                        model: &model,
+                        prompt: &prompt,
+                        messages: &messages,
+                        tools: Vec::new(),
+                        events: &mut ignore_events,
+                    })
                     .await?
             }
             other => {

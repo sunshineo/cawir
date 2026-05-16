@@ -20,8 +20,7 @@ use crate::{
     ollama::Ollama,
     openai::OpenAi,
     policy::PermissionMode,
-    prompt::SystemPrompt,
-    provider::{Provider, ProviderMetadata},
+    provider::{Provider, ProviderMetadata, ProviderRequest},
     session::{
         Message, MessageContent, Session, current_project_path, is_resumable,
         list_resumable_project_sessions, load_most_recent_session, load_session, save_session,
@@ -273,29 +272,12 @@ impl Provider for ActiveProvider {
 
     async fn send(
         &self,
-        client: &reqwest::Client,
-        credential: &ActiveCredential,
-        model: &str,
-        prompt: &SystemPrompt,
-        messages: &[Message],
-        tools: Vec<crate::provider::ToolDefinition>,
+        request: ProviderRequest<'_>,
     ) -> Result<crate::provider::ProviderResponse> {
         match self {
-            Self::Anthropic(provider) => {
-                provider
-                    .send(client, credential, model, prompt, messages, tools)
-                    .await
-            }
-            Self::Ollama(provider) => {
-                provider
-                    .send(client, credential, model, prompt, messages, tools)
-                    .await
-            }
-            Self::OpenAi(provider) => {
-                provider
-                    .send(client, credential, model, prompt, messages, tools)
-                    .await
-            }
+            Self::Anthropic(provider) => provider.send(request).await,
+            Self::Ollama(provider) => provider.send(request).await,
+            Self::OpenAi(provider) => provider.send(request).await,
         }
     }
 }
@@ -347,7 +329,8 @@ pub async fn run() -> Result<()> {
     save_session_if_needed(&mut session, is_resuming)?;
     runtime.hook_registry = HookRegistry::for_project(&session_project_path(&session)?)?;
 
-    let mut render = render_agent_event;
+    let mut render_state = TerminalRenderState::default();
+    let mut render = |event| render_agent_event(event, &mut render_state);
     render(AgentEvent::SessionStart {
         session_id: session.id.clone(),
         provider: runtime.provider.name().to_string(),
@@ -693,7 +676,22 @@ fn session_project_path(session: &Session) -> Result<PathBuf> {
     std::env::current_dir().map_err(Error::Io)
 }
 
-fn render_agent_event(event: AgentEvent) {
+#[derive(Default)]
+struct TerminalRenderState {
+    streaming_text: bool,
+}
+
+fn render_agent_event(event: AgentEvent, state: &mut TerminalRenderState) {
+    if let Err(error) = render_agent_event_to_writer(event, &mut io::stdout(), state) {
+        eprintln!("failed to render event: {error}");
+    }
+}
+
+fn render_agent_event_to_writer(
+    event: AgentEvent,
+    writer: &mut impl Write,
+    state: &mut TerminalRenderState,
+) -> io::Result<()> {
     match event {
         AgentEvent::SessionStart { .. } | AgentEvent::SessionEnd { .. } => {}
         AgentEvent::UserPromptSubmit { prompt } => {
@@ -707,13 +705,15 @@ fn render_agent_event(event: AgentEvent) {
             model,
             metadata,
         } => {
+            finish_stream_line(writer, state)?;
             if let Some(usage) = render_provider_metadata(&metadata) {
-                println!("model usage from {provider}/{model}: {usage}");
+                writeln!(writer, "model usage from {provider}/{model}: {usage}")?;
             }
         }
         AgentEvent::PreToolUse { id, name, input } => {
+            finish_stream_line(writer, state)?;
             let _ = input;
-            println!("tool request: {} ({})", name, id);
+            writeln!(writer, "tool request: {} ({})", name, id)?;
         }
         AgentEvent::PostToolUse {
             name,
@@ -722,28 +722,66 @@ fn render_agent_event(event: AgentEvent) {
             error,
             ..
         } => {
+            finish_stream_line(writer, state)?;
             if is_error {
-                println!(
+                writeln!(
+                    writer,
                     "tool error from {}: {}",
                     name,
                     error.unwrap_or_else(|| "unknown tool error".to_string())
-                );
+                )?;
             } else if name == "exit_plan_mode" {
-                println!("plan ready for approval");
+                writeln!(writer, "plan ready for approval")?;
             } else {
-                println!("tool result from {}: {} bytes", name, output_len);
+                writeln!(writer, "tool result from {}: {} bytes", name, output_len)?;
             }
         }
         AgentEvent::AssistantText { provider, text } => {
-            println!("{}: {}", provider, text);
+            if state.streaming_text {
+                writeln!(writer)?;
+                state.streaming_text = false;
+            } else {
+                writeln!(writer, "{}: {}", provider, text)?;
+            }
+        }
+        AgentEvent::AssistantTextDelta { provider, text } => {
+            if !state.streaming_text {
+                write!(writer, "{}: ", provider)?;
+                state.streaming_text = true;
+            }
+            write!(writer, "{text}")?;
+            writer.flush()?;
+        }
+        AgentEvent::AssistantToolUseStart { provider, id, name } => {
+            let _ = (provider, id, name);
+        }
+        AgentEvent::AssistantToolUseInputDelta {
+            provider,
+            id,
+            partial_json,
+        } => {
+            let _ = (provider, id, partial_json);
         }
         AgentEvent::Stop { reason } => {
+            finish_stream_line(writer, state)?;
             let _ = reason;
         }
         AgentEvent::StopFailure { message, .. } => {
+            finish_stream_line(writer, state)?;
             let _ = message;
         }
     }
+
+    Ok(())
+}
+
+fn finish_stream_line(writer: &mut impl Write, state: &mut TerminalRenderState) -> io::Result<()> {
+    if state.streaming_text {
+        writeln!(writer)?;
+        state.streaming_text = false;
+    }
+
+    Ok(())
 }
 
 fn render_provider_metadata(metadata: &ProviderMetadata) -> Option<String> {
@@ -1330,6 +1368,42 @@ mod tests {
             rendered.as_deref(),
             Some("input=100, output=20, cache_create=30, cache_read=40")
         );
+    }
+
+    #[test]
+    fn render_streaming_text_delta_suppresses_duplicate_final_text() {
+        let mut output = Vec::new();
+        let mut state = TerminalRenderState::default();
+
+        render_agent_event_to_writer(
+            AgentEvent::AssistantTextDelta {
+                provider: "anthropic".to_string(),
+                text: "hel".to_string(),
+            },
+            &mut output,
+            &mut state,
+        )
+        .unwrap();
+        render_agent_event_to_writer(
+            AgentEvent::AssistantTextDelta {
+                provider: "anthropic".to_string(),
+                text: "lo".to_string(),
+            },
+            &mut output,
+            &mut state,
+        )
+        .unwrap();
+        render_agent_event_to_writer(
+            AgentEvent::AssistantText {
+                provider: "anthropic".to_string(),
+                text: "hello".to_string(),
+            },
+            &mut output,
+            &mut state,
+        )
+        .unwrap();
+
+        assert_eq!(String::from_utf8(output).unwrap(), "anthropic: hello\n");
     }
 
     #[test]
