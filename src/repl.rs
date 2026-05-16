@@ -17,6 +17,7 @@ use crate::{
     },
     events::AgentEvent,
     hooks::HookRegistry,
+    mcp,
     ollama::Ollama,
     openai::OpenAi,
     policy::PermissionMode,
@@ -85,6 +86,7 @@ struct CommandContext<'a> {
     credential: &'a mut ActiveCredential,
     model: &'a mut String,
     model_preferences: &'a mut BTreeMap<String, String>,
+    tool_registry: &'a mut ToolRegistry,
     hook_registry: &'a mut HookRegistry,
     client: &'a reqwest::Client,
     session: &'a mut Session,
@@ -325,9 +327,14 @@ pub async fn run() -> Result<()> {
             &runtime.model,
         )
     });
-    sync_session_from_runtime(&mut session, &runtime);
+    let project_path = session_project_path(&session)?;
+    runtime.tool_registry = tool_registry_for_project(&project_path)?;
+    if is_resuming {
+        warn_if_tool_fingerprint_changed(&session, &runtime.tool_registry)?;
+    }
+    runtime.hook_registry = HookRegistry::for_project(&project_path)?;
+    sync_session_from_runtime(&mut session, &runtime)?;
     save_session_if_needed(&mut session, is_resuming)?;
-    runtime.hook_registry = HookRegistry::for_project(&session_project_path(&session)?)?;
 
     let mut render_state = TerminalRenderState::default();
     let mut render = |event| render_agent_event(event, &mut render_state);
@@ -368,6 +375,7 @@ pub async fn run() -> Result<()> {
                 credential: &mut runtime.credential,
                 model: &mut runtime.model,
                 model_preferences: &mut runtime.model_preferences,
+                tool_registry: &mut runtime.tool_registry,
                 hook_registry: &mut runtime.hook_registry,
                 client: &runtime.client,
                 session: &mut session,
@@ -375,11 +383,11 @@ pub async fn run() -> Result<()> {
 
             match runtime.command_registry.execute(trimmed, context).await {
                 Some(Ok(CommandOutcome::Continue)) => {
-                    sync_session_from_runtime(&mut session, &runtime);
+                    sync_session_from_runtime(&mut session, &runtime)?;
                     save_session_if_needed(&mut session, is_resuming)?;
                 }
                 Some(Ok(CommandOutcome::Exit)) => {
-                    sync_session_from_runtime(&mut session, &runtime);
+                    sync_session_from_runtime(&mut session, &runtime)?;
                     save_session_if_needed(&mut session, is_resuming)?;
                     break;
                 }
@@ -404,7 +412,7 @@ pub async fn run() -> Result<()> {
             eprintln!("error: {}", e);
             session.messages.truncate(history_len_before_turn);
         }
-        sync_session_from_runtime(&mut session, &runtime);
+        sync_session_from_runtime(&mut session, &runtime)?;
         save_session_if_needed(&mut session, is_resuming)?;
     }
 
@@ -454,13 +462,17 @@ async fn startup_provider_for_session(
     Ok((provider, credential))
 }
 
-fn sync_session_from_runtime(session: &mut Session, runtime: &Runtime) {
+fn sync_session_from_runtime(session: &mut Session, runtime: &Runtime) -> Result<()> {
     session.provider = runtime.provider.name().to_string();
     session.auth_option = runtime.credential.option_name().to_string();
     session.model = runtime.model.clone();
     if session.project_path.is_none() {
         session.project_path = current_project_path();
     }
+    session.tool_definition_fingerprint =
+        Some(runtime.tool_registry.definition_fingerprint(session.mode)?);
+
+    Ok(())
 }
 
 fn save_session_if_needed(session: &mut Session, was_loaded_from_disk: bool) -> Result<()> {
@@ -490,6 +502,12 @@ async fn resume_session(
         .await
         .map_err(|error| error.to_string())?;
 
+    let project_path = session_project_path(&new_session).map_err(|error| error.to_string())?;
+    let new_tool_registry =
+        tool_registry_for_project(&project_path).map_err(|error| error.to_string())?;
+    warn_if_tool_fingerprint_changed(&new_session, &new_tool_registry)
+        .map_err(|error| error.to_string())?;
+
     *context.provider = new_provider;
     *context.credential = new_credential;
     *context.model = new_session.model.clone();
@@ -504,10 +522,9 @@ async fn resume_session(
     )
     .map_err(|error| error.to_string())?;
     *context.session = new_session;
-    *context.hook_registry = HookRegistry::for_project(
-        &session_project_path(context.session).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
+    *context.tool_registry = new_tool_registry;
+    *context.hook_registry =
+        HookRegistry::for_project(&project_path).map_err(|error| error.to_string())?;
 
     println!("resumed session: {}", context.session.id);
     print_active_provider(context.provider, context.credential, context.model);
@@ -676,6 +693,38 @@ fn session_project_path(session: &Session) -> Result<PathBuf> {
     std::env::current_dir().map_err(Error::Io)
 }
 
+fn tool_registry_for_project(project_root: &Path) -> Result<ToolRegistry> {
+    let mut registry = ToolRegistry::builtins();
+    mcp::register_configured_tools(&mut registry, project_root)?;
+    Ok(registry)
+}
+
+fn warn_if_tool_fingerprint_changed(session: &Session, registry: &ToolRegistry) -> Result<()> {
+    let current_fingerprint = registry.definition_fingerprint(session.mode)?;
+    if let Some(warning) = tool_fingerprint_resume_warning(
+        session.tool_definition_fingerprint.as_deref(),
+        &current_fingerprint,
+    ) {
+        println!("{warning}");
+    }
+
+    Ok(())
+}
+
+fn tool_fingerprint_resume_warning(
+    saved_fingerprint: Option<&str>,
+    current_fingerprint: &str,
+) -> Option<String> {
+    let saved_fingerprint = saved_fingerprint?;
+    if saved_fingerprint == current_fingerprint {
+        return None;
+    }
+
+    Some(format!(
+        "warning: tool definitions changed since this session was saved; previous fingerprint {saved_fingerprint}, current fingerprint {current_fingerprint}. The next provider request may rebuild the prompt cache."
+    ))
+}
+
 #[derive(Default)]
 struct TerminalRenderState {
     streaming_text: bool,
@@ -697,18 +746,26 @@ fn render_agent_event_to_writer(
         AgentEvent::UserPromptSubmit { prompt } => {
             let _ = prompt;
         }
-        AgentEvent::ModelRequestStart { provider, model } => {
-            let _ = (provider, model);
+        AgentEvent::ModelRequestStart {
+            provider,
+            model,
+            tool_definition_fingerprint,
+        } => {
+            let _ = (provider, model, tool_definition_fingerprint);
         }
         AgentEvent::ModelRequestFinish {
             provider,
             model,
             metadata,
+            tool_definition_fingerprint,
         } => {
             finish_stream_line(writer, state)?;
-            if let Some(usage) = render_provider_metadata(&metadata) {
-                writeln!(writer, "model usage from {provider}/{model}: {usage}")?;
-            }
+            let observability =
+                render_request_observability(&metadata, &tool_definition_fingerprint);
+            writeln!(
+                writer,
+                "model request from {provider}/{model}: {observability}"
+            )?;
         }
         AgentEvent::PreToolUse { id, name, input } => {
             finish_stream_line(writer, state)?;
@@ -806,6 +863,14 @@ fn render_provider_metadata(metadata: &ProviderMetadata) -> Option<String> {
     }
 
     (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+fn render_request_observability(metadata: &ProviderMetadata, tool_fingerprint: &str) -> String {
+    let mut parts = render_provider_metadata(metadata)
+        .map(|usage| vec![usage])
+        .unwrap_or_default();
+    parts.push(format!("tools={tool_fingerprint}"));
+    parts.join(", ")
 }
 
 fn approve_plan_interactively() -> Result<bool> {
@@ -1368,6 +1433,42 @@ mod tests {
             rendered.as_deref(),
             Some("input=100, output=20, cache_create=30, cache_read=40")
         );
+    }
+
+    #[test]
+    fn request_observability_includes_usage_and_tool_fingerprint() {
+        let rendered = render_request_observability(
+            &ProviderMetadata {
+                usage: Some(TokenUsage {
+                    input_tokens: Some(100),
+                    output_tokens: Some(20),
+                    cache_creation_input_tokens: Some(30),
+                    cache_read_input_tokens: Some(40),
+                }),
+            },
+            "fnv1a64:abc123",
+        );
+
+        assert_eq!(
+            rendered,
+            "input=100, output=20, cache_create=30, cache_read=40, tools=fnv1a64:abc123"
+        );
+    }
+
+    #[test]
+    fn tool_fingerprint_warning_only_renders_on_resume_mismatch() {
+        assert_eq!(
+            tool_fingerprint_resume_warning(Some("fnv1a64:old"), "fnv1a64:new"),
+            Some(
+                "warning: tool definitions changed since this session was saved; previous fingerprint fnv1a64:old, current fingerprint fnv1a64:new. The next provider request may rebuild the prompt cache."
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            tool_fingerprint_resume_warning(Some("fnv1a64:same"), "fnv1a64:same"),
+            None
+        );
+        assert_eq!(tool_fingerprint_resume_warning(None, "fnv1a64:new"), None);
     }
 
     #[test]

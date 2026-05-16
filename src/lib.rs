@@ -4,6 +4,7 @@ mod auth;
 pub mod error;
 mod events;
 mod hooks;
+mod mcp;
 mod ollama;
 mod openai;
 mod policy;

@@ -67,9 +67,13 @@ where
     let mut tool_rounds = 0;
 
     loop {
+        let tool_definitions = context.tool_registry.definitions(context.mode);
+        let tool_definition_fingerprint = tools::tool_definition_fingerprint(&tool_definitions)?;
+
         (hooks.emit)(AgentEvent::ModelRequestStart {
             provider: context.provider.name().to_string(),
             model: context.model.to_string(),
+            tool_definition_fingerprint: tool_definition_fingerprint.clone(),
         });
 
         let prompt = match prompt::assemble(context.project_root) {
@@ -97,7 +101,7 @@ where
                     model: context.model,
                     prompt: &prompt,
                     messages: history,
-                    tools: context.tool_registry.definitions(context.mode),
+                    tools: tool_definitions,
                     events: &mut provider_events,
                 })
                 .await
@@ -117,6 +121,7 @@ where
             provider: context.provider.name().to_string(),
             model: context.model.to_string(),
             metadata,
+            tool_definition_fingerprint,
         });
 
         match response {

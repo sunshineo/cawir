@@ -59,6 +59,9 @@ pub enum Error {
     #[error("hook {hook} failed: {message}")]
     Hook { hook: String, message: String },
 
+    #[error("mcp server {server} failed: {message}")]
+    Mcp { server: String, message: String },
+
     #[error("tool loop exceeded {0} rounds")]
     ToolLoopLimitExceeded(usize),
 }

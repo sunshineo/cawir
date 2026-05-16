@@ -42,6 +42,7 @@ pub(crate) enum ToolKind {
     ReadOnly,
     WriteFile,
     Shell,
+    External,
     ExitPlanMode,
 }
 
@@ -49,19 +50,24 @@ pub(crate) fn permission_decision(mode: PermissionMode, tool: ToolKind) -> Permi
     match mode {
         PermissionMode::Default => match tool {
             ToolKind::ReadOnly | ToolKind::ExitPlanMode => PermissionDecision::Allow,
-            ToolKind::WriteFile | ToolKind::Shell => PermissionDecision::AskUser,
+            ToolKind::WriteFile | ToolKind::Shell | ToolKind::External => {
+                PermissionDecision::AskUser
+            }
         },
         PermissionMode::Plan => match tool {
             ToolKind::ReadOnly | ToolKind::ExitPlanMode => PermissionDecision::Allow,
             ToolKind::WriteFile | ToolKind::Shell => {
                 PermissionDecision::Deny("plan mode does not allow mutating tools")
             }
+            ToolKind::External => {
+                PermissionDecision::Deny("plan mode does not allow external tools")
+            }
         },
         PermissionMode::AcceptEdits => match tool {
             ToolKind::ReadOnly | ToolKind::WriteFile | ToolKind::ExitPlanMode => {
                 PermissionDecision::Allow
             }
-            ToolKind::Shell => PermissionDecision::AskUser,
+            ToolKind::Shell | ToolKind::External => PermissionDecision::AskUser,
         },
         PermissionMode::Bypass => PermissionDecision::Allow,
     }
@@ -104,6 +110,18 @@ mod tests {
         assert_eq!(
             permission_decision(PermissionMode::AcceptEdits, ToolKind::Shell),
             PermissionDecision::AskUser
+        );
+    }
+
+    #[test]
+    fn external_tools_are_approval_gated_outside_bypass() {
+        assert_eq!(
+            permission_decision(PermissionMode::Default, ToolKind::External),
+            PermissionDecision::AskUser
+        );
+        assert_eq!(
+            permission_decision(PermissionMode::Plan, ToolKind::External),
+            PermissionDecision::Deny("plan mode does not allow external tools")
         );
     }
 }

@@ -24,9 +24,9 @@ const SHELL_OUTPUT_MAX_BYTES: usize = 32 * 1024;
 const SHELL_TIMEOUT: Duration = Duration::from_secs(30);
 const SHELL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-trait Tool {
-    fn name(&self) -> &'static str;
-    fn description(&self) -> &'static str;
+pub(crate) trait Tool: Send + Sync {
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
     fn input_schema(&self) -> Value;
     fn kind(&self) -> ToolKind;
 
@@ -72,6 +72,26 @@ impl ToolRegistry {
             .collect()
     }
 
+    pub(crate) fn definition_fingerprint(&self, mode: PermissionMode) -> Result<String> {
+        tool_definition_fingerprint(&self.definitions(mode))
+    }
+
+    pub(crate) fn register(&mut self, tool: Box<dyn Tool>) -> Result<()> {
+        if self
+            .tools
+            .iter()
+            .any(|existing| existing.name() == tool.name())
+        {
+            return Err(Error::Env(format!(
+                "duplicate tool registered: {}",
+                tool.name()
+            )));
+        }
+
+        self.tools.push(tool);
+        Ok(())
+    }
+
     fn execute<F>(
         &self,
         project_root: &Path,
@@ -96,12 +116,30 @@ impl ToolRegistry {
     }
 }
 
-enum ToolOutput {
-    Result(String),
+pub(crate) fn tool_definition_fingerprint(definitions: &[ToolDefinition]) -> Result<String> {
+    let bytes = serde_json::to_vec(definitions).map_err(|error| {
+        Error::Env(format!(
+            "failed to serialize tool definitions for fingerprinting: {error}"
+        ))
+    })?;
+    Ok(format!("fnv1a64:{:016x}", fnv1a64(&bytes)))
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    const OFFSET: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+
+    bytes.iter().fold(OFFSET, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(PRIME)
+    })
+}
+
+pub(crate) enum ToolOutput {
+    Result { content: String, is_error: bool },
     PlanReady(String),
 }
 
-struct ToolContext {
+pub(crate) struct ToolContext {
     project_root: PathBuf,
 }
 
@@ -113,14 +151,14 @@ impl ToolContext {
     }
 }
 
-struct PreparedToolCall {
-    tool_name: &'static str,
-    kind: ToolKind,
-    approval: Option<ToolApprovalRequest>,
-    input: PreparedToolInput,
+pub(crate) struct PreparedToolCall {
+    pub(crate) tool_name: String,
+    pub(crate) kind: ToolKind,
+    pub(crate) approval: Option<ToolApprovalRequest>,
+    pub(crate) input: PreparedToolInput,
 }
 
-enum PreparedToolInput {
+pub(crate) enum PreparedToolInput {
     ReadFile {
         path: PathBuf,
     },
@@ -143,17 +181,32 @@ enum PreparedToolInput {
     ExitPlanMode {
         plan: String,
     },
+    External {
+        input: Value,
+    },
 }
 
 pub(crate) struct ToolApprovalRequest {
-    tool_name: &'static str,
+    tool_name: String,
     summary: String,
     denial_message: String,
 }
 
 impl ToolApprovalRequest {
-    pub(crate) fn tool_name(&self) -> &'static str {
-        self.tool_name
+    pub(crate) fn new(
+        tool_name: impl Into<String>,
+        summary: String,
+        denial_message: String,
+    ) -> Self {
+        Self {
+            tool_name: tool_name.into(),
+            summary,
+            denial_message,
+        }
+    }
+
+    pub(crate) fn tool_name(&self) -> &str {
+        &self.tool_name
     }
 
     pub(crate) fn summary(&self) -> &str {
@@ -209,11 +262,11 @@ pub(crate) struct ToolExecution {
 struct ReadFileTool;
 
 impl Tool for ReadFileTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "read_file"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Read the full contents of a UTF-8 text file from the current project. Use this when you need to inspect source code, configuration, documentation, or other text files before answering. Provide a path relative to the current working directory when possible. Do not use this for files outside the project unless the user clearly asks for them."
     }
 
@@ -240,7 +293,7 @@ impl Tool for ReadFileTool {
         let path = resolve_existing_project_path("read_file", path, context)?;
 
         Ok(PreparedToolCall {
-            tool_name: self.name(),
+            tool_name: self.name().to_string(),
             kind: self.kind(),
             approval: None,
             input: PreparedToolInput::ReadFile { path },
@@ -252,18 +305,21 @@ impl Tool for ReadFileTool {
             return Err(wrong_prepared_input(self.name()));
         };
 
-        execute_read_file(&path).map(ToolOutput::Result)
+        execute_read_file(&path).map(|content| ToolOutput::Result {
+            content,
+            is_error: false,
+        })
     }
 }
 
 struct ListFilesTool;
 
 impl Tool for ListFilesTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "list_files"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "List the files and directories inside a folder from the current project. Use this before read_file when you need to discover repository structure or find likely files to inspect. Provide a path relative to the current working directory when possible."
     }
 
@@ -290,7 +346,7 @@ impl Tool for ListFilesTool {
         let path = resolve_existing_project_path("list_files", path, context)?;
 
         Ok(PreparedToolCall {
-            tool_name: self.name(),
+            tool_name: self.name().to_string(),
             kind: self.kind(),
             approval: None,
             input: PreparedToolInput::ListFiles { path },
@@ -302,18 +358,21 @@ impl Tool for ListFilesTool {
             return Err(wrong_prepared_input(self.name()));
         };
 
-        execute_list_files(&path).map(ToolOutput::Result)
+        execute_list_files(&path).map(|content| ToolOutput::Result {
+            content,
+            is_error: false,
+        })
     }
 }
 
 struct WriteFileTool;
 
 impl Tool for WriteFileTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "write_file"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Write UTF-8 text content to a file in the current project. Use this only when the user asks you to create or replace a file. The write will require explicit user approval before it runs."
     }
 
@@ -354,13 +413,13 @@ impl Tool for WriteFileTool {
         let path = resolve_writable_project_path("write_file", raw_path, context)?;
 
         Ok(PreparedToolCall {
-            tool_name: self.name(),
+            tool_name: self.name().to_string(),
             kind: self.kind(),
-            approval: Some(ToolApprovalRequest {
-                tool_name: self.name(),
-                summary: format!("write {} bytes to {}", content.len(), path.display()),
-                denial_message: format!("user denied write to {}", path.display()),
-            }),
+            approval: Some(ToolApprovalRequest::new(
+                self.name(),
+                format!("write {} bytes to {}", content.len(), path.display()),
+                format!("user denied write to {}", path.display()),
+            )),
             input: PreparedToolInput::WriteFile {
                 path,
                 content: content.to_string(),
@@ -373,18 +432,21 @@ impl Tool for WriteFileTool {
             return Err(wrong_prepared_input(self.name()));
         };
 
-        execute_write_file(&path, &content).map(ToolOutput::Result)
+        execute_write_file(&path, &content).map(|content| ToolOutput::Result {
+            content,
+            is_error: false,
+        })
     }
 }
 
 struct EditFileTool;
 
 impl Tool for EditFileTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "edit_file"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Edit an existing UTF-8 text file in the current project by replacing exact text. Use this for routine changes to existing files instead of write_file. The edit will require explicit user approval before it runs."
     }
 
@@ -426,18 +488,18 @@ impl Tool for EditFileTool {
         let path = resolve_existing_project_path("edit_file", raw_path, context)?;
 
         Ok(PreparedToolCall {
-            tool_name: self.name(),
+            tool_name: self.name().to_string(),
             kind: self.kind(),
-            approval: Some(ToolApprovalRequest {
-                tool_name: self.name(),
-                summary: format!(
+            approval: Some(ToolApprovalRequest::new(
+                self.name(),
+                format!(
                     "replace {} bytes with {} bytes in {}",
                     old_string.len(),
                     new_string.len(),
                     path.display()
                 ),
-                denial_message: format!("user denied edit to {}", path.display()),
-            }),
+                format!("user denied edit to {}", path.display()),
+            )),
             input: PreparedToolInput::EditFile {
                 path,
                 old_string: old_string.to_string(),
@@ -458,18 +520,23 @@ impl Tool for EditFileTool {
             return Err(wrong_prepared_input(self.name()));
         };
 
-        execute_edit_file(&path, &old_string, &new_string, replace_all).map(ToolOutput::Result)
+        execute_edit_file(&path, &old_string, &new_string, replace_all).map(|content| {
+            ToolOutput::Result {
+                content,
+                is_error: false,
+            }
+        })
     }
 }
 
 struct ShellTool;
 
 impl Tool for ShellTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "shell"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Run a shell command in the current project. Do not use shell for directory listings, file reads, or file writes; use the dedicated list_files, read_file, and write_file tools for those. Use shell for commands that need a process, such as tests, formatters, builds, git commands, or search commands. The command will require explicit user approval before it runs."
     }
 
@@ -502,13 +569,13 @@ impl Tool for ShellTool {
         }
 
         Ok(PreparedToolCall {
-            tool_name: self.name(),
+            tool_name: self.name().to_string(),
             kind: self.kind(),
-            approval: Some(ToolApprovalRequest {
-                tool_name: self.name(),
-                summary: format!("run shell command: {}", command),
-                denial_message: format!("user denied shell command: {}", command),
-            }),
+            approval: Some(ToolApprovalRequest::new(
+                self.name(),
+                format!("run shell command: {}", command),
+                format!("user denied shell command: {}", command),
+            )),
             input: PreparedToolInput::Shell {
                 command: command.to_string(),
             },
@@ -520,18 +587,21 @@ impl Tool for ShellTool {
             return Err(wrong_prepared_input(self.name()));
         };
 
-        execute_shell(&command).map(ToolOutput::Result)
+        execute_shell(&command).map(|content| ToolOutput::Result {
+            content,
+            is_error: false,
+        })
     }
 }
 
 struct ExitPlanModeTool;
 
 impl Tool for ExitPlanModeTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "exit_plan_mode"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Submit a concise implementation plan for user approval. Use this when you are in plan mode and ready to ask permission to make changes."
     }
 
@@ -557,7 +627,7 @@ impl Tool for ExitPlanModeTool {
         let plan = input_string(input, "exit_plan_mode", "plan")?;
 
         Ok(PreparedToolCall {
-            tool_name: self.name(),
+            tool_name: self.name().to_string(),
             kind: self.kind(),
             approval: None,
             input: PreparedToolInput::ExitPlanMode {
@@ -672,14 +742,14 @@ where
                     };
 
                 match registry.execute(project_root, name, &input, mode, &mut approve) {
-                    Ok(ToolOutput::Result(content)) => {
+                    Ok(ToolOutput::Result { content, is_error }) => {
                         let post_event = AgentEvent::PostToolUse {
                             id: id.clone(),
                             name: name.clone(),
                             input: input.clone(),
                             output_len: content.len(),
-                            is_error: false,
-                            error: None,
+                            is_error,
+                            error: is_error.then(|| content.clone()),
                         };
                         match hook_registry.dispatch(&post_event) {
                             Ok(HookAction::Continue | HookAction::ModifyInput(_)) => {
@@ -687,7 +757,7 @@ where
                                 results.push(ToolResult {
                                     tool_use_id: id.clone(),
                                     content,
-                                    is_error: false,
+                                    is_error,
                                 });
                             }
                             Ok(HookAction::Deny(message)) => push_tool_error_result(
@@ -846,7 +916,7 @@ where
 {
     let project_root = std::env::current_dir()?;
     match ToolRegistry::builtins().execute(&project_root, name, input, mode, &mut approve)? {
-        ToolOutput::Result(content) => Ok(content),
+        ToolOutput::Result { content, .. } => Ok(content),
         ToolOutput::PlanReady(_) => Err(Error::ToolInput {
             tool: name.to_string(),
             message: "expected ordinary tool result, received plan-ready output".to_string(),
@@ -1519,6 +1589,25 @@ mod tests {
                 "shell"
             ]
         );
+    }
+
+    #[test]
+    fn tool_definition_fingerprint_is_stable_and_changes_with_advertised_tools() {
+        let registry = ToolRegistry::builtins();
+
+        let first = registry
+            .definition_fingerprint(PermissionMode::Default)
+            .unwrap();
+        let second = registry
+            .definition_fingerprint(PermissionMode::Default)
+            .unwrap();
+        let plan = registry
+            .definition_fingerprint(PermissionMode::Plan)
+            .unwrap();
+
+        assert_eq!(first, second);
+        assert!(first.starts_with("fnv1a64:"));
+        assert_ne!(first, plan);
     }
 
     #[test]

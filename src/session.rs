@@ -25,6 +25,8 @@ pub(crate) struct Session {
     pub(crate) mode: PermissionMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) project_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tool_definition_fingerprint: Option<String>,
     pub(crate) created_at: u64,
     pub(crate) updated_at: u64,
     pub(crate) messages: Vec<Message>,
@@ -126,6 +128,7 @@ impl Session {
             model: model.to_string(),
             mode: PermissionMode::Default,
             project_path: current_project_path(),
+            tool_definition_fingerprint: None,
             created_at: now,
             updated_at: now,
             messages: Vec::new(),
@@ -321,6 +324,7 @@ mod tests {
         let mut session = Session::new("ollama", "none", "qwen3:8b");
         session.id = "session-test".to_string();
         session.project_path = Some("/tmp/cawir".to_string());
+        session.tool_definition_fingerprint = Some("fnv1a64:abc123".to_string());
         session.messages.push(Message::user_text("hello"));
 
         let serialized = serde_json::to_value(session).unwrap();
@@ -332,11 +336,12 @@ mod tests {
         assert_eq!(serialized["model"], "qwen3:8b");
         assert_eq!(serialized["mode"], "default");
         assert_eq!(serialized["project_path"], "/tmp/cawir");
+        assert_eq!(serialized["tool_definition_fingerprint"], "fnv1a64:abc123");
         assert_eq!(serialized["messages"][0]["role"], "user");
     }
 
     #[test]
-    fn session_deserializes_without_project_path_for_backward_compatibility() {
+    fn session_deserializes_without_optional_metadata_for_backward_compatibility() {
         let session: Session = serde_json::from_str(
             r#"{
                 "schema_version": 1,
@@ -353,5 +358,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(session.project_path, None);
+        assert_eq!(session.tool_definition_fingerprint, None);
     }
 }
