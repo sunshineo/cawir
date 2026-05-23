@@ -1,5 +1,9 @@
 # Runtime Context Catalogs
 
+## Summary
+
+Runtime catalogs should store the cheap data needed to decide what might apply, not every heavy payload they can eventually produce. For skills, that means `SkillCatalog` owns metadata and paths, while `Skill` with full instructions is created only after activation.
+
 Checkpoint 13 added `SkillCatalog`, which is a runtime catalog rather than durable session data. The catalog is rebuilt from settings and plugin folders for the active project, while `Session` stays focused on serializable conversation history and provider/mode metadata.
 
 The Rust shape is deliberately owned, but split into metadata and active instructions:

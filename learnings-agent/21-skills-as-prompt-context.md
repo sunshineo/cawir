@@ -1,5 +1,9 @@
 # Skills As Prompt Context
 
+## Summary
+
+Skills are a prompt-context mechanism with progressive disclosure: discover cheap metadata early, activate from the user prompt, and insert full instructions only for matched skills. This keeps inactive workflow guidance out of model context while still making active guidance visible in request events and debug output.
+
 Skills are reusable instruction bundles, not tools. A tool gives the model a callable capability; a skill changes how the model should work on a prompt. That puts skills in prompt assembly, not in `ToolRegistry`.
 
 Checkpoint 13 keeps activation simple and inspectable:
