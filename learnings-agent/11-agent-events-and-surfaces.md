@@ -173,6 +173,27 @@ This serializes each event with a stable `type` field:
 
 That shape is easy for hooks, logs, JSON output, a TUI, or a WebSocket surface to consume. The cost is that event names and fields become harder to rename casually. Once external consumers match on `pre_tool_use`, changing that string is an API break.
 
+## App Server before UI polish
+
+OpenAI's Codex App Server write-up sharpened the CP14 direction: the foundation is
+not "add a TUI" or "add WebSocket" first. The foundation is a protocol boundary that
+lets rich clients drive the same harness without linking to surface internals or
+reimplementing the loop:
+<https://openai.com/index/unlocking-the-codex-harness/>
+
+For cawir, that means:
+
+- `cawir app-server` starts as stdio JSONL with JSON-RPC-style request, response,
+  and notification envelopes.
+- WebSocket is a later transport for the same protocol, not the protocol itself.
+- `exec`, TUI, and future IDE-style surfaces should reuse the same turn/session path
+  behind the app server.
+- Approval prompts are bidirectional protocol interactions: the server can ask the
+  client for a decision and pause the turn until the client responds.
+
+This also raises the cost of event/protocol churn. Once clients consume an
+app-server event, names and payloads become compatibility promises.
+
 ## Structured failures serve machines and humans
 
 Checkpoint 8 had `StopFailure { message: String }`. That was readable, but future hooks or alternate surfaces would have had to parse a human string to answer basic questions.

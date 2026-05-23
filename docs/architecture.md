@@ -87,7 +87,14 @@ Where user input arrives and agent output is rendered. Tightly coupled component
 
 **Slash-command parsing** — intercepts `/commands` before they reach the agent loop. Built-ins: `/exit`, `/clear`, `/help`, `/provider`, `/mode`, `/resume`. Additional commands can be loaded from `.cawir/commands/*.md` or plugins later.
 
-**Seam — alternate transports.** Swapping the REPL for a different consumer of `Stream<AgentEvent>` (`ratatui` TUI, WebSocket server, daemon mode, SDK stdio NDJSON) is a Surface-only change. The agent loop is transport-agnostic.
+**App Server** — a long-running stdio JSONL process with JSON-RPC-style request,
+response, and notification envelopes. This is the planned rich-client boundary:
+clients create/resume sessions, submit turns, receive streamed agent events, and
+answer approval requests without linking directly against REPL internals.
+
+**Seam — alternate transports and clients.** Swapping the REPL for an app-server
+client, `ratatui` TUI, WebSocket transport, daemon mode, or SDK stdio client is a
+Surface-only change. The agent loop is transport-agnostic.
 
 ### 2. Core engine
 
@@ -360,9 +367,10 @@ Things not built yet but with a clear place in the architecture:
 | **Auto-mode classifier** | Add `PermissionMode::Auto`; its implementation calls an LLM via `Provider` |
 | **Context compaction** | Strategy pattern: `fn compact(&self, s: &mut Session)` |
 | **Session memory extraction** | `MemoryStore` consumes `Session` at `SessionEnd`, writes consolidated memory |
-| **Richer terminal UI** | Replace REPL with a [Ratatui](https://ratatui.rs) consumer (Crossterm as the cross-platform backend) of the same `Stream<AgentEvent>`. Ratatui is the flagship Rust TUI library (immediate-mode rendering; used in production by OpenAI's Codex CLI, Netflix, AWS). Only the Surface layer changes — agent loop, event bus, tools all untouched. |
-| **Remote transports (WebSocket, SSE)** | Another consumer of the same stream |
-| **Daemon / headless mode** | Another consumer of the same stream; supervisor wrapping `agent::run` |
+| **App Server** | Canonical rich-client boundary: JSON-RPC-style messages over stdio JSONL first, with client request/response, server notifications, and server-initiated approval requests mapped onto the same agent events. |
+| **Richer terminal UI** | Prefer a [Ratatui](https://ratatui.rs) client (Crossterm as the cross-platform backend) of the App Server boundary. Same-process embedding can be a temporary learning step, but the long-term shape is client over protocol. |
+| **Remote transports (WebSocket, SSE)** | Additional transports for the same app-server protocol once stdio semantics are stable. |
+| **Daemon / headless mode** | Supervisor wrapping the same app-server/session runtime; `exec` should reuse the same turn-running path rather than duplicate the agent loop. |
 | **Prompt caching** | Each `PromptSection` carries `cache_breakpoint: bool`; provider translates |
 | **Streaming** | Already the design; providers emit token-by-token into `CompletionStream` |
 

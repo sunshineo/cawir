@@ -23,7 +23,7 @@ Some sub-steps use simpler-than-final patterns so the Rust concept of the moment
 |---|---|
 | Foundation — not yet an agent | 1. Echo · 2. Chat |
 | The agent | 3. Agent loop ⭐ · 3.5. Refactor shape |
-| Craft and extension seams | 4. Providers/auth · 5. Modes · 6. Registries · 7. Resume · 8. Events · 8.5. Foundation hardening · 9. Hooks/settings · 10. Streaming · 11. MCP · 12. Plugins · 13. Skills · 14. Surfaces |
+| Craft and extension seams | 4. Providers/auth · 5. Modes · 6. Registries · 7. Resume · 8. Events · 8.5. Foundation hardening · 9. Hooks/settings · 10. Streaming · 11. MCP · 12. Plugins · 13. Skills · 14. App Server/surfaces |
 
 ---
 
@@ -120,7 +120,7 @@ This is an organizational checkpoint, not an abstraction checkpoint. The goal is
 - **3.5c — Move agent loop to `agent.rs`**. Move `run_agent_turn`, `MAX_TOOL_ROUNDS`, and loop orchestration out of `lib.rs`. The agent loop calls the concrete Anthropic module and the concrete tools module. *Rust:* borrowing `&mut Vec<Message>` through orchestration, module boundaries around control flow.
     - *Iterates into:* CP8 events, CP9 hooks, and CP10 streaming will change how the loop emits progress, but this step preserves the current request-tool-result loop.
 - **3.5d — Move REPL and slash commands to `repl.rs`**. Move `run`, `print_help`, startup setup, and the slash-command `match` out of `lib.rs`. Leave `/exit` and `/help` concrete. *Rust:* library exports, binary crate calling `cawir::run`, keeping surface code separate from engine code.
-    - *Iterates into:* `/provider` in CP4 and `/mode` in CP5 will extend the concrete slash-command match before any command registry exists. Later Surface implementations can sit beside or replace `repl.rs`: a richer TUI, a one-shot `exec` command, stdio protocol mode, or a WebSocket server.
+    - *Iterates into:* `/provider` in CP4 and `/mode` in CP5 will extend the concrete slash-command match before any command registry exists. Later Surface implementations can sit beside or replace `repl.rs`: the CP14 App Server, a one-shot `exec` command, a richer TUI, or a WebSocket transport.
 
 Expected shape after 3.5:
 
@@ -143,7 +143,7 @@ Why this shape:
 - `repl.rs` is the current Surface implementation: startup setup, line-based stdin/stdout, slash commands, and rendering.
 - `agent.rs` is Core engine orchestration: one user turn, model calls, tool calls, history mutation, and loop limits.
 
-The reason for this split is transport independence. `repl.rs` is only one way to talk to the agent. Future TUI, stdio, WebSocket, or one-shot CLI surfaces should reuse `agent.rs`, `session.rs`, `tools.rs`, and provider code instead of duplicating the agent loop.
+The reason for this split is transport independence. `repl.rs` is only one way to talk to the agent. Future App Server, TUI, WebSocket, or one-shot CLI surfaces should reuse `agent.rs`, `session.rs`, `tools.rs`, and provider code instead of duplicating the agent loop.
 
 *Deferred:*
 - `Provider` trait → CP4, when OpenAI is added.
@@ -173,7 +173,7 @@ The rest of the roadmap is ordered by dependency, not by feature excitement:
 11 MCP
 12 Plugins
 13 Skills
-14 Alternate surfaces
+14 App Server and alternate surfaces
 ```
 
 Reasoning:
@@ -387,18 +387,45 @@ Components: Capabilities, Core engine, External.
 
 ---
 
-## 14 — Alternate Surfaces
+## 14 — App Server and Alternate Surfaces
 
-Add new ways to talk to the same agent engine.
+Add a protocol boundary for rich clients, then put alternate user interfaces on top of
+that boundary.
+
+Architecture note: OpenAI's [Codex App Server write-up](https://openai.com/index/unlocking-the-codex-harness/)
+shows that rich surfaces should not each embed their own special access path into the
+harness. The stable boundary is a long-running app-server process that exposes the
+agent loop through a client-friendly, bidirectional JSON-RPC-style protocol. The
+primary transport should be stdio JSONL first; WebSocket can come later as another
+transport for the same protocol.
 
 Sub-steps:
 
-- **14a — One-shot CLI**. `cawir exec "..."` runs one prompt headlessly and exits.
-- **14b — Stdio protocol mode**. Long-running process reads structured messages from stdin and writes structured events/results to stdout.
-- **14c — TUI**. Rich terminal UI with panes, scrolling, status, and keybindings. Likely Ratatui + Crossterm.
-- **14d — WebSocket / JSON-RPC server**. WebSocket is the transport; JSON-RPC is an optional request/response protocol that can run over WebSocket, stdio, or HTTP.
+- **14a — App-server protocol skeleton over stdio**. Add `cawir app-server`,
+  a long-running stdio JSONL process with JSON-RPC-style request, response, and
+  notification envelopes. Start with initialization and protocol-version handshake,
+  then define the first thread/turn primitives without duplicating the REPL loop.
+  *Rust:* protocol enums, tagged serde messages, stdin/stdout framing, request ids.
+- **14b — Drive turns through the app server**. Let a client create or resume a
+  session, submit one turn, receive streamed `AgentEvent` notifications, and answer
+  approval requests. This is the real foundation milestone: a non-REPL client can
+  drive `agent.rs` through the protocol boundary. *Rust:* long-lived runtime state,
+  bidirectional request handling, mapping internal events to stable protocol events.
+- **14c — One-shot CLI on the same path**. `cawir exec "..."` runs one prompt
+  headlessly and exits, implemented as a thin surface over the same turn-running
+  service/protocol concepts instead of a separate agent loop. It should support
+  automation-friendly structured output and clear process exit status.
+- **14d — TUI as a client**. Rich terminal UI with panes, scrolling, status, and
+  keybindings. Likely Ratatui + Crossterm. Prefer making it a client of the app-server
+  boundary, or at least a thin adapter over the same service layer if same-process
+  embedding is still simpler while learning.
+- **14e — WebSocket transport**. Add WebSocket as another transport for the same
+  app-server protocol after stdio semantics are stable. JSON-RPC is the protocol;
+  WebSocket is only a transport.
 
-Done when: at least one non-REPL surface can drive the same `agent.rs` core without duplicating the agent loop.
+Done when: a non-REPL client can drive the same `agent.rs` core through the
+app-server boundary without duplicating the agent loop, and at least one human- or
+automation-facing surface is built on that foundation.
 
 Components: Surface.
 
@@ -422,7 +449,7 @@ Components: Surface.
 | 11 | MCP | external protocol clients, process lifecycle |
 | 12 | Plugins | manifest parsing, contribution registration |
 | 13 | Skills | prompt assembly, dynamic context selection |
-| 14 | Surfaces | transport boundaries, stdio/WebSocket protocol layering |
+| 14 | App Server / Surfaces | protocol envelopes, transport boundaries, stdio JSONL, JSON-RPC-style request/notification layering |
 
 ## Beyond Checkpoint 14 (speculative)
 
