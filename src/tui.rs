@@ -10,6 +10,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use ratatui_textarea::{Input, Key, TextArea};
 use serde_json::{Map, Value, json};
 
 use crate::{
@@ -56,8 +57,7 @@ struct TuiState {
     session: SessionInfo,
     transcript: Vec<String>,
     tools: Vec<String>,
-    input: String,
-    input_cursor: usize,
+    input: TextArea<'static>,
     pending_approval: Option<PendingApproval>,
     streaming_assistant: Option<String>,
 }
@@ -74,8 +74,7 @@ impl TuiState {
             session,
             transcript: Vec::new(),
             tools: Vec::new(),
-            input: String::new(),
-            input_cursor: 0,
+            input: input_textarea(""),
             pending_approval: None,
             streaming_assistant: None,
         }
@@ -171,69 +170,21 @@ impl TuiState {
     }
 
     fn clear_input(&mut self) {
-        self.input.clear();
-        self.input_cursor = 0;
+        self.input = input_textarea("");
     }
 
-    fn insert_input_char(&mut self, ch: char) {
-        self.input.insert(self.input_cursor, ch);
-        self.input_cursor += ch.len_utf8();
+    fn input_text(&self) -> &str {
+        self.input.lines().first().map(String::as_str).unwrap_or("")
     }
 
-    fn move_input_cursor_left(&mut self) {
-        if self.input_cursor == 0 {
-            return;
-        }
-        self.input_cursor = self
-            .input
-            .get(..self.input_cursor)
-            .and_then(|prefix| prefix.char_indices().last().map(|(index, _)| index))
-            .unwrap_or(0);
+    #[cfg(test)]
+    fn set_input_text(&mut self, text: &str) {
+        self.input = input_textarea(text);
     }
+}
 
-    fn move_input_cursor_right(&mut self) {
-        if self.input_cursor >= self.input.len() {
-            return;
-        }
-        if let Some(ch) = self.input[self.input_cursor..].chars().next() {
-            self.input_cursor += ch.len_utf8();
-        }
-    }
-
-    fn move_input_cursor_home(&mut self) {
-        self.input_cursor = 0;
-    }
-
-    fn move_input_cursor_end(&mut self) {
-        self.input_cursor = self.input.len();
-    }
-
-    fn backspace_input(&mut self) {
-        if self.input_cursor == 0 {
-            return;
-        }
-        let previous = self
-            .input
-            .get(..self.input_cursor)
-            .and_then(|prefix| prefix.char_indices().last().map(|(index, _)| index))
-            .unwrap_or(0);
-        self.input.drain(previous..self.input_cursor);
-        self.input_cursor = previous;
-    }
-
-    fn delete_input(&mut self) {
-        if self.input_cursor >= self.input.len() {
-            return;
-        }
-        if let Some(ch) = self.input[self.input_cursor..].chars().next() {
-            let next = self.input_cursor + ch.len_utf8();
-            self.input.drain(self.input_cursor..next);
-        }
-    }
-
-    fn input_cursor_column(&self) -> u16 {
-        self.input[..self.input_cursor].chars().count() as u16
-    }
+fn input_textarea(text: impl Into<String>) -> TextArea<'static> {
+    TextArea::from([text.into()])
 }
 
 pub(crate) fn run(options: TuiOptions) -> Result<()> {
@@ -498,9 +449,9 @@ fn handle_key(
         return Ok(KeyAction::Continue);
     }
 
-    match key.code {
-        KeyCode::Enter if pending_turn_id.is_none() && !state.input.trim().is_empty() => {
-            let prompt = state.input.trim().to_string();
+    if is_submit_key(key) {
+        if pending_turn_id.is_none() && !state.input_text().trim().is_empty() {
+            let prompt = state.input_text().trim().to_string();
             if is_exit_command(&prompt) {
                 state.clear_input();
                 return Ok(KeyAction::Quit);
@@ -520,15 +471,10 @@ fn handle_key(
                 }),
             )?;
         }
-        KeyCode::Char(ch) => state.insert_input_char(ch),
-        KeyCode::Backspace => state.backspace_input(),
-        KeyCode::Delete => state.delete_input(),
-        KeyCode::Left => state.move_input_cursor_left(),
-        KeyCode::Right => state.move_input_cursor_right(),
-        KeyCode::Home => state.move_input_cursor_home(),
-        KeyCode::End => state.move_input_cursor_end(),
-        _ => {}
+        return Ok(KeyAction::Continue);
     }
+
+    state.input.input(textarea_input_from_key(key));
 
     Ok(KeyAction::Continue)
 }
@@ -536,6 +482,39 @@ fn handle_key(
 fn should_quit(key: KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char('q'))
         || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c'))
+}
+
+fn is_submit_key(key: KeyEvent) -> bool {
+    key.code == KeyCode::Enter
+        || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('m'))
+}
+
+fn textarea_input_from_key(key: KeyEvent) -> Input {
+    let textarea_key = match key.code {
+        KeyCode::Char(ch) => Key::Char(ch),
+        KeyCode::Backspace => Key::Backspace,
+        KeyCode::Enter => Key::Enter,
+        KeyCode::Left => Key::Left,
+        KeyCode::Right => Key::Right,
+        KeyCode::Up => Key::Up,
+        KeyCode::Down => Key::Down,
+        KeyCode::Tab | KeyCode::BackTab => Key::Tab,
+        KeyCode::Delete => Key::Delete,
+        KeyCode::Home => Key::Home,
+        KeyCode::End => Key::End,
+        KeyCode::PageUp => Key::PageUp,
+        KeyCode::PageDown => Key::PageDown,
+        KeyCode::Esc => Key::Esc,
+        KeyCode::F(number) => Key::F(number),
+        _ => Key::Null,
+    };
+
+    Input {
+        key: textarea_key,
+        ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
+        alt: key.modifiers.contains(KeyModifiers::ALT),
+        shift: key.modifiers.contains(KeyModifiers::SHIFT) || key.code == KeyCode::BackTab,
+    }
 }
 
 fn is_exit_command(input: &str) -> bool {
@@ -630,14 +609,13 @@ fn render_state(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
 
     let input_area = outer[2];
     frame.render_widget(
-        Paragraph::new(state.input.as_str())
+        Paragraph::new(state.input_text())
             .block(Block::default().title("Input").borders(Borders::ALL)),
         input_area,
     );
     let input_inner_width = input_area.width.saturating_sub(2);
-    let cursor_column = state
-        .input_cursor_column()
-        .min(input_inner_width.saturating_sub(1));
+    let cursor = state.input.cursor();
+    let cursor_column = (cursor.1 as u16).min(input_inner_width.saturating_sub(1));
     frame.set_cursor_position(Position {
         x: input_area.x.saturating_add(1).saturating_add(cursor_column),
         y: input_area.y.saturating_add(1),
@@ -668,6 +646,7 @@ fn render_state_to_text(state: &TuiState, width: u16, height: u16) -> Result<Str
 #[cfg(test)]
 mod tests {
     use ratatui::{Terminal, backend::TestBackend, layout::Position};
+    use ratatui_textarea::CursorMove;
     use serde_json::json;
 
     use super::*;
@@ -757,8 +736,8 @@ mod tests {
             "approval/tool".to_string(),
             json!({ "tool_name": "write_file", "summary": "write src/main.rs" }),
         );
-        state.input = "next prompt".to_string();
-        state.move_input_cursor_end();
+        state.set_input_text("next prompt");
+        state.input.move_cursor(CursorMove::End);
 
         let rendered = render_state_to_text(&state, 100, 32).unwrap();
 
@@ -788,7 +767,7 @@ mod tests {
             model: "gpt-5.4".to_string(),
             mode: "default".to_string(),
         });
-        state.input = "/exit".to_string();
+        state.set_input_text("/exit");
         let mut writer = Vec::new();
         let mut next_id = 3;
         let mut pending_turn_id = None;
@@ -805,7 +784,7 @@ mod tests {
         assert_eq!(action, KeyAction::Quit);
         assert!(writer.is_empty());
         assert!(pending_turn_id.is_none());
-        assert!(state.input.is_empty());
+        assert!(state.input_text().is_empty());
         assert!(state.transcript.is_empty());
     }
 
@@ -888,8 +867,86 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(state.input, "cd");
-        assert_eq!(state.input_cursor, state.input.len());
+        assert_eq!(state.input_text(), "cd");
+        assert_eq!(
+            state.input.cursor(),
+            (0, state.input_text().chars().count())
+        );
+    }
+
+    #[test]
+    fn input_editor_uses_readline_home_and_end_shortcuts() {
+        let mut state = TuiState::new(SessionInfo {
+            session_id: "session-1".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-5.4".to_string(),
+            mode: "default".to_string(),
+        });
+        let mut writer = Vec::new();
+        let mut next_id = 3;
+        let mut pending_turn_id = None;
+
+        for key in [
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        ] {
+            handle_key(
+                key,
+                &mut writer,
+                &mut state,
+                &mut next_id,
+                &mut pending_turn_id,
+            )
+            .unwrap();
+        }
+
+        assert_eq!(state.input_text(), "bacd");
+    }
+
+    #[test]
+    fn input_editor_uses_readline_word_shortcuts() {
+        let mut state = TuiState::new(SessionInfo {
+            session_id: "session-1".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-5.4".to_string(),
+            mode: "default".to_string(),
+        });
+        let mut writer = Vec::new();
+        let mut next_id = 3;
+        let mut pending_turn_id = None;
+
+        for ch in "hello world".chars() {
+            handle_key(
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                &mut writer,
+                &mut state,
+                &mut next_id,
+                &mut pending_turn_id,
+            )
+            .unwrap();
+        }
+        handle_key(
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT),
+            &mut writer,
+            &mut state,
+            &mut next_id,
+            &mut pending_turn_id,
+        )
+        .unwrap();
+        handle_key(
+            KeyEvent::new(KeyCode::Char('_'), KeyModifiers::NONE),
+            &mut writer,
+            &mut state,
+            &mut next_id,
+            &mut pending_turn_id,
+        )
+        .unwrap();
+
+        assert_eq!(state.input_text(), "hello _world");
     }
 
     #[test]
@@ -900,8 +957,8 @@ mod tests {
             model: "gpt-5.4".to_string(),
             mode: "default".to_string(),
         });
-        state.input = "abcd".to_string();
-        state.input_cursor = 2;
+        state.set_input_text("abcd");
+        state.input.move_cursor(CursorMove::Jump(0, 2));
         let backend = TestBackend::new(100, 32);
         let mut terminal = Terminal::new(backend).unwrap();
 

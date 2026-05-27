@@ -102,3 +102,28 @@ frame.set_cursor_position(Position { x, y });
 
 The terminal decides whether that cursor blinks. The TUI's job is to keep it at
 the right cell for the current input state.
+
+## Use a text editor crate before growing a local editor
+
+After the first TUI input pass, cawir could move the cursor with arrows and edit
+inside the line. But normal terminal shortcuts such as `Ctrl-A`, `Ctrl-E`, and
+`Alt-B` still did not work.
+
+That is a good extraction signal. Line editing has a lot of edge cases:
+
+- word movement
+- delete-word commands
+- UTF-8 cursor movement
+- undo/redo buffers
+- backend-specific key events
+
+Instead of growing all of that in `src/tui.rs`, cawir now stores input in
+`ratatui_textarea::TextArea`. The TUI still renders the same single-line input
+pane itself, but the textarea crate owns the editing state and keybinding
+behavior.
+
+One practical compatibility detail: `ratatui-textarea 0.9` uses Ratatui's newer
+split crates internally (`ratatui-core` and `ratatui-widgets`), while cawir's TUI
+still uses monolithic `ratatui = 0.29` for rendering. To keep this step narrow,
+cawir depends on `ratatui-textarea` with default features disabled and converts
+Crossterm keys into the crate's backend-neutral `Input` type directly.
