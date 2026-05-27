@@ -1,45 +1,36 @@
 use std::{
     collections::BTreeMap,
     future::Future,
-    io::{self, ErrorKind, Write},
-    path::{Path, PathBuf},
+    io::{self, Write},
+    path::Path,
     pin::Pin,
 };
 
-use clap::Parser;
-
 use crate::{
-    Error, Result, agent,
-    anthropic::Anthropic,
+    Error, Result,
     auth::{
         ActiveCredential, AuthOption, ProviderPreference, acquire_codex_oauth, find_option,
-        load_provider_preference, resolve_for_provider, save_api_key, save_provider_preference,
+        load_provider_preference, resolve_for_provider, save_api_key,
     },
     events::AgentEvent,
     hooks::HookRegistry,
-    mcp,
-    ollama::Ollama,
-    openai::OpenAi,
     plugins::{PluginCatalog, PluginCommandContribution},
     policy::PermissionMode,
-    provider::{Provider, ProviderMetadata, ProviderRequest},
+    provider::{Provider, ProviderMetadata},
+    runtime::{self, ActiveProvider, Runtime},
     session::{
-        Message, MessageContent, Session, current_project_path, is_resumable,
-        list_resumable_project_sessions, load_most_recent_session, load_session, save_session,
+        Message, MessageContent, Session, list_resumable_project_sessions,
+        load_most_recent_session, load_session,
     },
     settings::SettingsResolver,
     skills::SkillCatalog,
-    tools::{ToolApprovalRequest, ToolRegistry},
+    tools::{PlanReady, ToolApprovalRequest, ToolRegistry},
 };
 
-#[derive(Debug, Parser)]
-#[command(name = "cawir", about = "Coding Agent Written in Rust")]
-struct Cli {
-    #[arg(long, value_name = "ID", conflicts_with = "continue_session")]
-    resume: Option<String>,
-
-    #[arg(long = "continue", conflicts_with = "resume")]
-    continue_session: bool,
+#[derive(Debug)]
+pub(crate) struct ReplOptions {
+    pub(crate) resume: Option<String>,
+    pub(crate) continue_session: bool,
 }
 
 type CommandFuture<'a> =
@@ -132,18 +123,6 @@ enum CommandOutcome {
     Continue,
     Exit,
     ReloadProjectCommands,
-}
-
-struct Runtime {
-    provider: ActiveProvider,
-    credential: ActiveCredential,
-    model: String,
-    model_preferences: BTreeMap<String, String>,
-    client: reqwest::Client,
-    command_registry: CommandRegistry,
-    tool_registry: ToolRegistry,
-    hook_registry: HookRegistry,
-    skill_catalog: SkillCatalog,
 }
 
 struct ExitCommand;
@@ -280,76 +259,12 @@ impl Command for PluginSlashCommand {
     }
 }
 
-enum ActiveProvider {
-    Anthropic(Anthropic),
-    Ollama(Ollama),
-    OpenAi(OpenAi),
-}
+pub(crate) async fn run(options: ReplOptions) -> Result<()> {
+    runtime::load_dotenv()?;
 
-impl Provider for ActiveProvider {
-    fn name(&self) -> &'static str {
-        match self {
-            Self::Anthropic(provider) => provider.name(),
-            Self::Ollama(provider) => provider.name(),
-            Self::OpenAi(provider) => provider.name(),
-        }
-    }
-
-    fn auth_options(&self) -> &'static [crate::auth::AuthOption] {
-        match self {
-            Self::Anthropic(provider) => provider.auth_options(),
-            Self::Ollama(provider) => provider.auth_options(),
-            Self::OpenAi(provider) => provider.auth_options(),
-        }
-    }
-
-    fn default_model(&self, credential: &ActiveCredential) -> &'static str {
-        match self {
-            Self::Anthropic(provider) => provider.default_model(credential),
-            Self::Ollama(provider) => provider.default_model(credential),
-            Self::OpenAi(provider) => provider.default_model(credential),
-        }
-    }
-
-    async fn available_models(
-        &self,
-        client: &reqwest::Client,
-        credential: &ActiveCredential,
-    ) -> Result<Vec<String>> {
-        match self {
-            Self::Anthropic(provider) => provider.available_models(client, credential).await,
-            Self::Ollama(provider) => provider.available_models(client, credential).await,
-            Self::OpenAi(provider) => provider.available_models(client, credential).await,
-        }
-    }
-
-    fn fallback_models(&self, credential: &ActiveCredential) -> &'static [&'static str] {
-        match self {
-            Self::Anthropic(provider) => provider.fallback_models(credential),
-            Self::Ollama(provider) => provider.fallback_models(credential),
-            Self::OpenAi(provider) => provider.fallback_models(credential),
-        }
-    }
-
-    async fn send(
-        &self,
-        request: ProviderRequest<'_>,
-    ) -> Result<crate::provider::ProviderResponse> {
-        match self {
-            Self::Anthropic(provider) => provider.send(request).await,
-            Self::Ollama(provider) => provider.send(request).await,
-            Self::OpenAi(provider) => provider.send(request).await,
-        }
-    }
-}
-
-pub async fn run() -> Result<()> {
-    let cli = Cli::parse();
-    load_dotenv()?;
-
-    let client = reqwest::Client::builder().user_agent("cawir/0.1").build()?;
+    let client = runtime::build_http_client()?;
     let preference = load_provider_preference()?;
-    let resumed_session = load_requested_session(&cli)?;
+    let resumed_session = load_requested_session(&options)?;
     let is_resuming = resumed_session.is_some();
 
     let (provider, credential) = if let Some(session) = &resumed_session {
@@ -365,9 +280,12 @@ pub async fn run() -> Result<()> {
     let model = resumed_session
         .as_ref()
         .map(|session| session.model.clone())
-        .unwrap_or_else(|| model_for_provider(&provider, &credential, &model_preferences));
-    model_preferences.insert(model_preference_key(&provider, &credential), model.clone());
-    save_current_preference(&provider, &credential, &model_preferences)?;
+        .unwrap_or_else(|| runtime::model_for_provider(&provider, &credential, &model_preferences));
+    model_preferences.insert(
+        runtime::model_preference_key(&provider, &credential),
+        model.clone(),
+    );
+    runtime::save_current_preference(&provider, &credential, &model_preferences)?;
 
     let mut runtime = Runtime {
         provider,
@@ -375,7 +293,6 @@ pub async fn run() -> Result<()> {
         model,
         model_preferences,
         client,
-        command_registry: CommandRegistry::builtins(),
         tool_registry: ToolRegistry::builtins(),
         hook_registry: HookRegistry::empty(),
         skill_catalog: SkillCatalog::empty(),
@@ -387,16 +304,16 @@ pub async fn run() -> Result<()> {
             &runtime.model,
         )
     });
-    let project_path = session_project_path(&session)?;
-    runtime.command_registry = CommandRegistry::for_project(&project_path)?;
-    runtime.tool_registry = tool_registry_for_project(&project_path)?;
-    runtime.skill_catalog = skill_catalog_for_project(&project_path)?;
+    let project_path = runtime::session_project_path(&session)?;
+    let mut command_registry = CommandRegistry::for_project(&project_path)?;
+    runtime.tool_registry = runtime::tool_registry_for_project(&project_path)?;
+    runtime.skill_catalog = runtime::skill_catalog_for_project(&project_path)?;
     if is_resuming {
         warn_if_tool_fingerprint_changed(&session, &runtime.tool_registry)?;
     }
     runtime.hook_registry = HookRegistry::for_project(&project_path)?;
-    sync_session_from_runtime(&mut session, &runtime)?;
-    save_session_if_needed(&mut session, is_resuming)?;
+    runtime::sync_session_from_runtime(&mut session, &runtime)?;
+    runtime::save_session_if_needed(&mut session, is_resuming)?;
 
     let mut render_state = TerminalRenderState::default();
     let mut render = |event| render_agent_event(event, &mut render_state);
@@ -405,7 +322,9 @@ pub async fn run() -> Result<()> {
         provider: runtime.provider.name().to_string(),
         model: runtime.model.clone(),
         mode: session.mode,
-        project_path: session_project_path(&session)?.display().to_string(),
+        project_path: runtime::session_project_path(&session)?
+            .display()
+            .to_string(),
     });
 
     print_active_provider(&runtime.provider, &runtime.credential, &runtime.model);
@@ -444,22 +363,22 @@ pub async fn run() -> Result<()> {
                 session: &mut session,
             };
 
-            match runtime.command_registry.execute(trimmed, context).await {
+            match command_registry.execute(trimmed, context).await {
                 Some(Ok(CommandOutcome::Continue)) => {
-                    sync_session_from_runtime(&mut session, &runtime)?;
-                    save_session_if_needed(&mut session, is_resuming)?;
+                    runtime::sync_session_from_runtime(&mut session, &runtime)?;
+                    runtime::save_session_if_needed(&mut session, is_resuming)?;
                 }
                 Some(Ok(CommandOutcome::Exit)) => {
-                    sync_session_from_runtime(&mut session, &runtime)?;
-                    save_session_if_needed(&mut session, is_resuming)?;
+                    runtime::sync_session_from_runtime(&mut session, &runtime)?;
+                    runtime::save_session_if_needed(&mut session, is_resuming)?;
                     break;
                 }
                 Some(Ok(CommandOutcome::ReloadProjectCommands)) => {
-                    let project_path = session_project_path(&session)?;
-                    runtime.command_registry = CommandRegistry::for_project(&project_path)?;
-                    runtime.skill_catalog = skill_catalog_for_project(&project_path)?;
-                    sync_session_from_runtime(&mut session, &runtime)?;
-                    save_session_if_needed(&mut session, is_resuming)?;
+                    let project_path = runtime::session_project_path(&session)?;
+                    command_registry = CommandRegistry::for_project(&project_path)?;
+                    runtime.skill_catalog = runtime::skill_catalog_for_project(&project_path)?;
+                    runtime::sync_session_from_runtime(&mut session, &runtime)?;
+                    runtime::save_session_if_needed(&mut session, is_resuming)?;
                 }
                 Some(Err(error)) => println!("{}", error),
                 None => println!("unknown command: {}", trimmed),
@@ -468,23 +387,31 @@ pub async fn run() -> Result<()> {
         }
 
         let history_len_before_turn = session.messages.len();
-        agent::submit_user_prompt(trimmed, &mut session.messages, &mut render);
+        crate::agent::submit_user_prompt(trimmed, &mut session.messages, &mut render);
 
-        if let Err(e) = run_agent_until_complete(
+        let mut approve_tool = approve_tool_interactively;
+        let mut approve_plan = approve_plan_interactively;
+        let mut surface_hooks = runtime::SurfaceTurnHooks {
+            emit: &mut render,
+            approve_tool: &mut approve_tool,
+            approve_plan: &mut approve_plan,
+        };
+
+        if let Err(e) = runtime::run_agent_until_complete(
             &runtime,
-            session_project_path(&session)?,
+            runtime::session_project_path(&session)?,
             &mut session.mode,
             &mut session.messages,
             trimmed,
-            &mut render,
+            &mut surface_hooks,
         )
         .await
         {
             eprintln!("error: {}", e);
             session.messages.truncate(history_len_before_turn);
         }
-        sync_session_from_runtime(&mut session, &runtime)?;
-        save_session_if_needed(&mut session, is_resuming)?;
+        runtime::sync_session_from_runtime(&mut session, &runtime)?;
+        runtime::save_session_if_needed(&mut session, is_resuming)?;
     }
 
     render(AgentEvent::SessionEnd {
@@ -494,14 +421,14 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
-fn load_requested_session(cli: &Cli) -> Result<Option<Session>> {
-    if let Some(id) = &cli.resume {
+fn load_requested_session(options: &ReplOptions) -> Result<Option<Session>> {
+    if let Some(id) = &options.resume {
         let session = load_session(id)?;
         println!("resuming session: {}", session.id);
         return Ok(Some(session));
     }
 
-    if cli.continue_session {
+    if options.continue_session {
         let Some(session) = load_most_recent_session()? else {
             return Err(Error::Env(
                 "no saved sessions found for --continue".to_string(),
@@ -518,40 +445,19 @@ async fn startup_provider_for_session(
     session: &Session,
     client: &reqwest::Client,
 ) -> Result<(ActiveProvider, ActiveCredential)> {
-    let provider = provider_by_name(&session.provider)
+    let provider = runtime::provider_by_name(&session.provider)
         .map_err(|message| Error::Env(format!("saved session has unknown provider: {message}")))?;
     let preference = ProviderPreference {
         provider: session.provider.clone(),
         auth_option: session.auth_option.clone(),
         models: BTreeMap::from([(
-            model_preference_key_parts(&session.provider, &session.auth_option),
+            runtime::model_preference_key_parts(&session.provider, &session.auth_option),
             session.model.clone(),
         )]),
     };
     let credential = credential_for_provider(&provider, Some(&preference), client).await?;
 
     Ok((provider, credential))
-}
-
-fn sync_session_from_runtime(session: &mut Session, runtime: &Runtime) -> Result<()> {
-    session.provider = runtime.provider.name().to_string();
-    session.auth_option = runtime.credential.option_name().to_string();
-    session.model = runtime.model.clone();
-    if session.project_path.is_none() {
-        session.project_path = current_project_path();
-    }
-    session.tool_definition_fingerprint =
-        Some(runtime.tool_registry.definition_fingerprint(session.mode)?);
-
-    Ok(())
-}
-
-fn save_session_if_needed(session: &mut Session, was_loaded_from_disk: bool) -> Result<()> {
-    if was_loaded_from_disk || is_resumable(session) {
-        save_session(session)?;
-    }
-
-    Ok(())
 }
 
 async fn resume_session(
@@ -573,11 +479,12 @@ async fn resume_session(
         .await
         .map_err(|error| error.to_string())?;
 
-    let project_path = session_project_path(&new_session).map_err(|error| error.to_string())?;
+    let project_path =
+        runtime::session_project_path(&new_session).map_err(|error| error.to_string())?;
     let new_tool_registry =
-        tool_registry_for_project(&project_path).map_err(|error| error.to_string())?;
+        runtime::tool_registry_for_project(&project_path).map_err(|error| error.to_string())?;
     let new_skill_catalog =
-        skill_catalog_for_project(&project_path).map_err(|error| error.to_string())?;
+        runtime::skill_catalog_for_project(&project_path).map_err(|error| error.to_string())?;
     warn_if_tool_fingerprint_changed(&new_session, &new_tool_registry)
         .map_err(|error| error.to_string())?;
 
@@ -585,10 +492,10 @@ async fn resume_session(
     *context.credential = new_credential;
     *context.model = new_session.model.clone();
     context.model_preferences.insert(
-        model_preference_key(context.provider, context.credential),
+        runtime::model_preference_key(context.provider, context.credential),
         context.model.clone(),
     );
-    save_current_preference(
+    runtime::save_current_preference(
         context.provider,
         context.credential,
         context.model_preferences,
@@ -698,100 +605,9 @@ fn truncate_for_transcript(value: &str) -> String {
     }
 }
 
-async fn run_agent_until_complete(
-    runtime: &Runtime,
-    project_root: PathBuf,
-    mode: &mut PermissionMode,
-    history: &mut Vec<Message>,
-    user_prompt: &str,
-    emit: &mut impl FnMut(AgentEvent),
-) -> Result<()> {
-    let active_skills = runtime.skill_catalog.activate_for_prompt(user_prompt)?;
-    loop {
-        let mut approve_tool = approve_tool_interactively;
-        let mut hooks = agent::TurnHooks {
-            emit,
-            approve: &mut approve_tool,
-        };
-
-        let context = agent::TurnContext {
-            provider: &runtime.provider,
-            client: &runtime.client,
-            credential: &runtime.credential,
-            model: &runtime.model,
-            project_root: &project_root,
-            mode: *mode,
-            tool_registry: &runtime.tool_registry,
-            hook_registry: &runtime.hook_registry,
-            active_skills: &active_skills,
-        };
-
-        match agent::run_turn(context, history, &mut hooks).await? {
-            agent::TurnOutcome::Complete => return Ok(()),
-            agent::TurnOutcome::PlanReady(plan_ready) => {
-                println!();
-                println!("proposed plan:");
-                println!("{}", plan_ready.plan);
-                if approve_plan_interactively()? {
-                    *mode = PermissionMode::Default;
-                    println!("mode: {}", (*mode).name());
-                    if let Some(tool_use_id) = plan_ready.tool_use_id {
-                        history.push(Message::user_tool_result(
-                            tool_use_id,
-                            "plan approved; continue in default mode".to_string(),
-                        ));
-                    } else {
-                        return Ok(());
-                    }
-                } else {
-                    if let Some(tool_use_id) = plan_ready.tool_use_id {
-                        history.push(Message::user_tool_results(vec![
-                            crate::session::ToolResult {
-                                tool_use_id,
-                                content: "plan denied by user; stay in plan mode".to_string(),
-                                is_error: true,
-                            },
-                        ]));
-                    } else {
-                        println!("mode: {}", (*mode).name());
-                        return Ok(());
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn session_project_path(session: &Session) -> Result<PathBuf> {
-    if let Some(project_path) = &session.project_path {
-        return Ok(Path::new(project_path).to_path_buf());
-    }
-
-    std::env::current_dir().map_err(Error::Io)
-}
-
-fn tool_registry_for_project(project_root: &Path) -> Result<ToolRegistry> {
-    let settings = SettingsResolver::for_project(project_root)?.load()?;
-    let plugins = PluginCatalog::from_settings(&settings, project_root)?;
-    let settings = plugins.merged_settings(settings);
-    let mut registry = ToolRegistry::builtins();
-    mcp::register_tools_from_settings(&mut registry, &settings, project_root)?;
-    plugins.register_tools(&mut registry, project_root)?;
-    Ok(registry)
-}
-
-fn skill_catalog_for_project(project_root: &Path) -> Result<SkillCatalog> {
-    let settings = SettingsResolver::for_project(project_root)?.load()?;
-    let plugins = PluginCatalog::from_settings(&settings, project_root)?;
-    let plugin_skill_directories = plugins.skill_directories();
-    let settings = plugins.merged_settings(settings);
-
-    SkillCatalog::from_settings(&settings, project_root, plugin_skill_directories)
-}
-
 fn warn_if_tool_fingerprint_changed(session: &Session, registry: &ToolRegistry) -> Result<()> {
     let current_fingerprint = registry.definition_fingerprint(session.mode)?;
-    if let Some(warning) = tool_fingerprint_resume_warning(
+    if let Some(warning) = runtime::tool_fingerprint_resume_warning(
         session.tool_definition_fingerprint.as_deref(),
         &current_fingerprint,
     ) {
@@ -799,20 +615,6 @@ fn warn_if_tool_fingerprint_changed(session: &Session, registry: &ToolRegistry) 
     }
 
     Ok(())
-}
-
-fn tool_fingerprint_resume_warning(
-    saved_fingerprint: Option<&str>,
-    current_fingerprint: &str,
-) -> Option<String> {
-    let saved_fingerprint = saved_fingerprint?;
-    if saved_fingerprint == current_fingerprint {
-        return None;
-    }
-
-    Some(format!(
-        "warning: tool definitions changed since this session was saved; previous fingerprint {saved_fingerprint}, current fingerprint {current_fingerprint}. The next provider request may rebuild the prompt cache."
-    ))
 }
 
 #[derive(Default)]
@@ -975,7 +777,10 @@ fn render_request_observability(
     parts.join(", ")
 }
 
-fn approve_plan_interactively() -> Result<bool> {
+fn approve_plan_interactively(plan_ready: &PlanReady) -> Result<bool> {
+    println!();
+    println!("proposed plan:");
+    println!("{}", plan_ready.plan);
     print!("approve plan and switch to default mode? [y/N] ");
     io::stdout().flush()?;
 
@@ -994,14 +799,6 @@ fn approve_tool_interactively(request: &ToolApprovalRequest) -> Result<bool> {
     io::stdin().read_line(&mut answer)?;
 
     Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES"))
-}
-
-fn load_dotenv() -> Result<()> {
-    match dotenvy::dotenv() {
-        Ok(_) => Ok(()),
-        Err(dotenvy::Error::Io(error)) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(Error::Env(format!("failed to load .env: {}", error))),
-    }
 }
 
 async fn startup_provider(
@@ -1023,9 +820,10 @@ async fn startup_provider(
     ]);
 
     for name in candidates {
-        let provider = provider_by_name(&name)
+        let provider = runtime::provider_by_name(&name)
             .map_err(|message| Error::Env(format!("unknown provider value: {message}")))?;
-        if let Some(credential) = try_credential_for_provider(&provider, preference, client).await?
+        if let Some(credential) =
+            runtime::try_credential_for_provider(&provider, preference, client).await?
         {
             return Ok((provider, credential));
         }
@@ -1037,94 +835,19 @@ async fn startup_provider(
     Ok((provider, credential))
 }
 
-fn provider_by_name(name: &str) -> std::result::Result<ActiveProvider, String> {
-    match name {
-        "anthropic" => Ok(ActiveProvider::Anthropic(Anthropic)),
-        "ollama" => Ok(ActiveProvider::Ollama(Ollama)),
-        "openai" => Ok(ActiveProvider::OpenAi(OpenAi)),
-        other => Err(format!("{}. Expected anthropic, openai, or ollama.", other)),
-    }
-}
-
-fn available_providers() -> [ActiveProvider; 3] {
-    [
-        ActiveProvider::Anthropic(Anthropic),
-        ActiveProvider::Ollama(Ollama),
-        ActiveProvider::OpenAi(OpenAi),
-    ]
-}
-
 async fn credential_for_provider(
     provider: &impl Provider,
     preference: Option<&ProviderPreference>,
     client: &reqwest::Client,
 ) -> Result<ActiveCredential> {
-    if let Some(credential) = try_credential_for_provider(provider, preference, client).await? {
+    if let Some(credential) =
+        runtime::try_credential_for_provider(provider, preference, client).await?
+    {
         return Ok(credential);
     }
 
     println!("No configured credentials found for {}.", provider.name());
     acquire_credential_for_provider(provider, client).await
-}
-
-fn model_for_provider(
-    provider: &impl Provider,
-    credential: &ActiveCredential,
-    model_preferences: &BTreeMap<String, String>,
-) -> String {
-    let key = model_preference_key(provider, credential);
-    model_preferences
-        .get(&key)
-        .or_else(|| model_preferences.get(provider.name()))
-        .cloned()
-        .unwrap_or_else(|| provider.default_model(credential).to_string())
-}
-
-fn save_current_preference(
-    provider: &impl Provider,
-    credential: &ActiveCredential,
-    model_preferences: &BTreeMap<String, String>,
-) -> Result<()> {
-    let mut models = model_preferences.clone();
-    models
-        .entry(model_preference_key(provider, credential))
-        .or_insert_with(|| provider.default_model(credential).to_string());
-
-    save_provider_preference(&ProviderPreference {
-        provider: provider.name().to_string(),
-        auth_option: credential.option_name().to_string(),
-        models,
-    })
-}
-
-fn model_preference_key(provider: &impl Provider, credential: &ActiveCredential) -> String {
-    model_preference_key_parts(provider.name(), credential.option_name())
-}
-
-fn model_preference_key_parts(provider: &str, auth_option: &str) -> String {
-    format!("{provider}:{auth_option}")
-}
-
-async fn try_credential_for_provider(
-    provider: &impl Provider,
-    preference: Option<&ProviderPreference>,
-    client: &reqwest::Client,
-) -> Result<Option<ActiveCredential>> {
-    let preferred_option = preference
-        .filter(|preference| preference.provider == provider.name())
-        .map(|preference| preference.auth_option.as_str());
-
-    match resolve_for_provider(
-        provider.name(),
-        provider.auth_options(),
-        preferred_option,
-        client,
-    )
-    .await
-    {
-        Ok(credential) => Ok(Some(credential)),
-        Err(_) => Ok(None),
-    }
 }
 
 async fn switch_provider(
@@ -1142,7 +865,7 @@ async fn switch_provider(
         return Ok(());
     };
 
-    let new_provider = provider_by_name(name)?;
+    let new_provider = runtime::provider_by_name(name)?;
     let mut requested_option = None;
     let mut reset = false;
 
@@ -1174,12 +897,12 @@ async fn switch_provider(
 
     *provider = new_provider;
     *active_credential = new_credential;
-    *model = model_for_provider(provider, active_credential, model_preferences);
+    *model = runtime::model_for_provider(provider, active_credential, model_preferences);
     model_preferences.insert(
-        model_preference_key(provider, active_credential),
+        runtime::model_preference_key(provider, active_credential),
         model.clone(),
     );
-    save_current_preference(provider, active_credential, model_preferences)
+    runtime::save_current_preference(provider, active_credential, model_preferences)
         .map_err(|error| error.to_string())?;
 
     println!(
@@ -1278,7 +1001,7 @@ fn prompt_provider() -> Result<ActiveProvider> {
         io::stdin().read_line(&mut line)?;
         let name = line.trim();
 
-        match provider_by_name(name) {
+        match runtime::provider_by_name(name) {
             Ok(provider) => return Ok(provider),
             Err(error) => println!("{}", error),
         }
@@ -1349,8 +1072,11 @@ async fn switch_model(
     }
 
     *model = new_model.to_string();
-    model_preferences.insert(model_preference_key(provider, credential), model.clone());
-    save_current_preference(provider, credential, model_preferences)
+    model_preferences.insert(
+        runtime::model_preference_key(provider, credential),
+        model.clone(),
+    );
+    runtime::save_current_preference(provider, credential, model_preferences)
         .map_err(|error| error.to_string())?;
     Ok(())
 }
@@ -1410,7 +1136,7 @@ fn print_providers(provider: &ActiveProvider) {
 
 fn print_available_providers() {
     println!("available providers:");
-    for provider in available_providers() {
+    for provider in runtime::available_providers() {
         let credential_options = provider
             .auth_options()
             .iter()
@@ -1474,14 +1200,17 @@ mod tests {
     #[test]
     fn model_preference_key_includes_provider_and_auth_option() {
         assert_eq!(
-            model_preference_key_parts("openai", "api-key"),
+            runtime::model_preference_key_parts("openai", "api-key"),
             "openai:api-key"
         );
         assert_eq!(
-            model_preference_key_parts("openai", "codex-oauth"),
+            runtime::model_preference_key_parts("openai", "codex-oauth"),
             "openai:codex-oauth"
         );
-        assert_eq!(model_preference_key_parts("ollama", "none"), "ollama:none");
+        assert_eq!(
+            runtime::model_preference_key_parts("ollama", "none"),
+            "ollama:none"
+        );
     }
 
     #[test]
@@ -1614,17 +1343,20 @@ mod tests {
     #[test]
     fn tool_fingerprint_warning_only_renders_on_resume_mismatch() {
         assert_eq!(
-            tool_fingerprint_resume_warning(Some("fnv1a64:old"), "fnv1a64:new"),
+            runtime::tool_fingerprint_resume_warning(Some("fnv1a64:old"), "fnv1a64:new"),
             Some(
                 "warning: tool definitions changed since this session was saved; previous fingerprint fnv1a64:old, current fingerprint fnv1a64:new. The next provider request may rebuild the prompt cache."
                     .to_string()
             )
         );
         assert_eq!(
-            tool_fingerprint_resume_warning(Some("fnv1a64:same"), "fnv1a64:same"),
+            runtime::tool_fingerprint_resume_warning(Some("fnv1a64:same"), "fnv1a64:same"),
             None
         );
-        assert_eq!(tool_fingerprint_resume_warning(None, "fnv1a64:new"), None);
+        assert_eq!(
+            runtime::tool_fingerprint_resume_warning(None, "fnv1a64:new"),
+            None
+        );
     }
 
     #[test]

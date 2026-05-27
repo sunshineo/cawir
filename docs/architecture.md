@@ -378,8 +378,11 @@ Things not built yet but with a clear place in the architecture:
 
 ```
 src/
-├── main.rs              thin: arg parse → launch repl::run()
+├── main.rs              thin: install Tokio runtime → launch cawir::run()
 ├── lib.rs               re-exports the public library surface
+├── cli.rs               top-level CLI dispatch across surfaces
+├── app_server.rs        stdio JSONL App Server protocol boundary
+├── runtime.rs           provider/session runtime handles shared by surfaces
 ├── agent.rs             agent loop, emits Stream<AgentEvent>
 ├── event.rs             AgentEvent, HookAction enums
 ├── repl.rs              stdin reader, slash-command parser, event consumer

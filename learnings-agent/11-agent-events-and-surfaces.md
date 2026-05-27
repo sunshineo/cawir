@@ -194,6 +194,139 @@ For cawir, that means:
 This also raises the cost of event/protocol churn. Once clients consume an
 app-server event, names and payloads become compatibility promises.
 
+## JSON-RPC messages are shape-based
+
+JSON-RPC-style protocols usually do not wrap every message in a top-level
+`type` field. Instead, the message kind is inferred from fields:
+
+```json
+{"id":1,"method":"initialize","params":{}}
+```
+
+This is a client request: the `id` means the client expects a response.
+
+```json
+{"method":"initialized","params":{}}
+```
+
+This is a client notification: no `id`, so the server should not answer.
+
+```json
+{"id":1,"result":{}}
+```
+
+This is a success response.
+
+```json
+{"id":1,"error":{"code":-32601,"message":"method not found"}}
+```
+
+This is an error response.
+
+That shape-based style is why 14a parses app-server input differently from
+`AgentEvent`. `AgentEvent` is cawir-owned, so a stable explicit `type` field is
+clearer. App Server follows a JSON-RPC-style boundary, so requests and notifications
+are recognized by their fields.
+
+Bad client input should be part of the protocol, not a process crash:
+
+- malformed JSON becomes a parse-error response
+- valid JSON with the wrong message shape becomes an invalid-request response
+- unknown methods become method-not-found responses
+
+This distinction matters for rich clients. An IDE, TUI, or future WebSocket client
+needs structured failures it can display or recover from without guessing from
+stderr text.
+
+## Shared runtime below surfaces
+
+Checkpoint 14b moved the reusable non-UI runtime pieces out of `repl.rs` and into
+`runtime.rs`.
+
+The split is:
+
+```text
+runtime.rs: provider handle, credential, model, HTTP client, registries, session sync,
+            project context loading, generic turn execution
+
+repl.rs:    terminal input/output, slash commands, transcript rendering, interactive
+            credential prompts, interactive tool/plan approvals
+```
+
+This keeps the REPL as one surface instead of the owner of the harness. A future
+App Server method can create/resume sessions and run turns by using the same runtime
+path, then supply protocol callbacks for approvals and event notifications instead
+of terminal prompts.
+
+This is a different boundary from `agent.rs`. The agent loop still owns the model
+and tool orchestration for one turn. `runtime.rs` owns the reusable application
+handles and repeated "run until complete, including plan approval continuations"
+policy that every surface needs.
+
+## App Server as a stateful protocol surface
+
+The first useful App Server boundary is stateful. `initialize` only negotiates the
+protocol. After that, a client creates or resumes one active session:
+
+```text
+session/new    -> prepare Runtime + Session
+session/resume -> load Session + prepare matching Runtime
+turn/submit    -> append user prompt, run the shared runtime turn loop
+```
+
+During `turn/submit`, the server sends `AgentEvent` values as notifications:
+
+```json
+{"method":"event","params":{"session_id":"...","event":{"type":"assistant_text_delta","text":"..."}}}
+```
+
+Approval is bidirectional. When the model asks for a mutating tool or plan exit,
+the server sends a request to the client and waits for a response:
+
+```json
+{"id":"server-1","method":"approval/tool","params":{"tool_name":"write_file","summary":"..."}}
+{"id":"server-1","result":{"approved":true}}
+```
+
+That keeps policy decisions in the same turn loop while letting each surface decide
+how approval is rendered. The REPL asks with terminal text; App Server asks with a
+protocol request.
+
+The App Server must not print credential setup prompts to stdout, because stdout is
+the JSONL protocol stream. For now it only uses already-configured credentials and
+returns structured errors when credentials are missing. Interactive credential setup
+stays in REPL until there is a protocol-shaped credential flow.
+
+## Non-interactive means protocol-shaped interaction
+
+Calling the App Server "non-interactive" does not mean clients can never ask a
+human for a decision. It means the server itself does not print ad hoc terminal
+prompts and then read arbitrary human text from stdin.
+
+The REPL owns a human terminal, so it can do this:
+
+```text
+approve write_file? [y/N]
+```
+
+The App Server owns a protocol stream:
+
+```text
+stdin  = JSONL requests and responses from the client
+stdout = JSONL responses, notifications, and server requests
+```
+
+So every interaction must be shaped as protocol data:
+
+```json
+{"id":"server-1","method":"approval/tool","params":{"tool_name":"write_file"}}
+{"id":"server-1","result":{"approved":true}}
+```
+
+That is still interactive at the product level. A TUI, IDE extension, or web
+client may show a dialog to the user. The important boundary is that App Server
+only sees structured client responses, not terminal keystrokes.
+
 ## Structured failures serve machines and humans
 
 Checkpoint 8 had `StopFailure { message: String }`. That was readable, but future hooks or alternate surfaces would have had to parse a human string to answer basic questions.

@@ -1,6 +1,8 @@
 mod agent;
 mod anthropic;
+mod app_server;
 mod auth;
+mod cli;
 pub mod error;
 mod events;
 mod hooks;
@@ -12,10 +14,11 @@ mod policy;
 mod prompt;
 mod provider;
 mod repl;
+mod runtime;
 pub mod session;
 mod settings;
 mod skills;
 mod tools;
 
+pub use cli::run;
 pub use error::{Error, Result};
-pub use repl::run;

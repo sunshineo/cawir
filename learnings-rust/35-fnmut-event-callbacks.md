@@ -119,3 +119,54 @@ An async stream would introduce more design questions:
 - can multiple consumers subscribe?
 
 Those questions are real, but cawir only has one surface today: the REPL. `FnMut(AgentEvent)` is enough until a second surface, hook runner, or daemon mode creates pressure for a stream abstraction.
+
+## Multiple callbacks for a shared surface runtime
+
+Checkpoint 14b kept the same callback idea but widened it from "render events" to
+"let the surface supply decisions."
+
+The shared runtime turn runner receives callbacks for:
+
+- emitting `AgentEvent` values
+- approving tool use
+- approving or denying a plan
+
+That lets `runtime.rs` own the common turn loop while `repl.rs` decides how those
+interactions look in a terminal. A future App Server can pass callbacks that write
+JSON notifications and wait for protocol responses instead.
+
+The Rust idea is the same: `FnMut` is a small interface for "call this repeatedly,
+and let it mutate the state it captured." The callback may render to stdout, push
+events into a vector, write JSONL, or record a pending approval request. The runtime
+does not need to know which surface supplied it.
+
+## Interior mutability inside protocol callbacks
+
+Checkpoint 14b's App Server callbacks need to share the same input/output handles:
+
+- event callback writes JSONL notifications
+- tool approval callback writes an approval request and reads the client's response
+- plan approval callback does the same for plans
+
+Naively, three closures all want `&mut writer`, which Rust rejects because it would
+create multiple mutable borrows at the same time.
+
+The App Server uses `RefCell` and `Cell` for this local, single-threaded callback
+coordination:
+
+```rust
+let writer_cell = RefCell::new(writer);
+let next_request_id = Cell::new(self.next_server_request_id);
+```
+
+`RefCell<T>` moves the borrow check from compile time to runtime. Each callback
+borrows the writer only while it is writing a line, then releases it. If two mutable
+borrows overlapped, `RefCell` would panic, so this is only appropriate when the code
+shape makes overlap impossible or easy to reason about.
+
+`Cell<u64>` is for small `Copy` values. It lets callbacks increment the server-side
+request counter without needing a mutable borrow of the whole App Server struct.
+
+This is a pragmatic bridge for synchronous callbacks. If App Server later becomes
+fully concurrent, this local `RefCell` shape should be revisited in favor of an
+explicit async transport/task boundary.
