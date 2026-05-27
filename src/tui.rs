@@ -424,6 +424,11 @@ fn handle_key(
     next_id: &mut u64,
     pending_turn_id: &mut Option<u64>,
 ) -> Result<KeyAction> {
+    if is_clear_input_key(key) {
+        state.clear_input();
+        return Ok(KeyAction::Continue);
+    }
+
     if state.pending_approval.is_some() {
         match key.code {
             KeyCode::Char('a') | KeyCode::Char('A') => {
@@ -435,7 +440,7 @@ fn handle_key(
                     )?;
                 }
             }
-            KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Esc => {
+            KeyCode::Char('d') | KeyCode::Char('D') => {
                 if let Some(answer) = state.answer_approval(false) {
                     app_client::write_response(
                         writer,
@@ -481,6 +486,10 @@ fn handle_key(
 
 fn should_quit(key: KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char('q'))
+}
+
+fn is_clear_input_key(key: KeyEvent) -> bool {
+    key.code == KeyCode::Esc
         || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c'))
 }
 
@@ -786,6 +795,77 @@ mod tests {
         assert!(pending_turn_id.is_none());
         assert!(state.input_text().is_empty());
         assert!(state.transcript.is_empty());
+    }
+
+    #[test]
+    fn ctrl_c_does_not_quit_tui() {
+        assert!(!should_quit(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )));
+    }
+
+    #[test]
+    fn ctrl_c_clears_input_without_submitting_a_turn() {
+        let mut state = TuiState::new(SessionInfo {
+            session_id: "session-1".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-5.4".to_string(),
+            mode: "default".to_string(),
+        });
+        state.set_input_text("draft prompt");
+        let mut writer = Vec::new();
+        let mut next_id = 3;
+        let mut pending_turn_id = None;
+
+        let action = handle_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &mut writer,
+            &mut state,
+            &mut next_id,
+            &mut pending_turn_id,
+        )
+        .unwrap();
+
+        assert_eq!(action, KeyAction::Continue);
+        assert!(writer.is_empty());
+        assert!(pending_turn_id.is_none());
+        assert!(state.input_text().is_empty());
+        assert!(state.transcript.is_empty());
+    }
+
+    #[test]
+    fn esc_clears_input_without_denying_pending_approval() {
+        let mut state = TuiState::new(SessionInfo {
+            session_id: "session-1".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-5.4".to_string(),
+            mode: "default".to_string(),
+        });
+        state.set_input_text("draft prompt");
+        state.handle_approval_request(
+            json!("server-1"),
+            "approval/tool".to_string(),
+            json!({ "tool_name": "shell", "summary": "run cargo test" }),
+        );
+        let mut writer = Vec::new();
+        let mut next_id = 3;
+        let mut pending_turn_id = None;
+
+        let action = handle_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut writer,
+            &mut state,
+            &mut next_id,
+            &mut pending_turn_id,
+        )
+        .unwrap();
+
+        assert_eq!(action, KeyAction::Continue);
+        assert!(writer.is_empty());
+        assert!(pending_turn_id.is_none());
+        assert!(state.input_text().is_empty());
+        assert!(state.pending_approval.is_some());
     }
 
     #[test]

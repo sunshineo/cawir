@@ -127,3 +127,21 @@ split crates internally (`ratatui-core` and `ratatui-widgets`), while cawir's TU
 still uses monolithic `ratatui = 0.29` for rendering. To keep this step narrow,
 cawir depends on `ratatui-textarea` with default features disabled and converts
 Crossterm keys into the crate's backend-neutral `Input` type directly.
+
+## Key precedence is part of UI behavior
+
+Once the TUI has app-level keys and editor-level keys, the order matters.
+
+For cawir's input pane, clear-input keys run before approval handling and before
+passing keys to `ratatui-textarea`:
+
+```text
+Ctrl-C / Esc -> clear draft input
+approval keys -> answer pending approval
+Enter -> submit prompt
+everything else -> textarea editor input
+```
+
+That prevents surprising behavior. For example, `Esc` should not accidentally
+deny a pending approval when the user's intent is to clear the current draft,
+and `Ctrl-C` should not immediately terminate the TUI while editing text.
