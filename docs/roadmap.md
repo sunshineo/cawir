@@ -17,7 +17,7 @@ Some sub-steps use simpler-than-final patterns so the Rust concept of the moment
 - **`ContentBlock` as a struct, not a tagged enum** (2c–2e). Only handles text blocks; will fail to deserialize tool_use blocks. Grows into a `#[serde(tag = "type")]` enum at **3b (Parse tool-use responses)**.
 - **Tool input schemas as raw `serde_json::Value`** (starting at 3a). First tool schemas are written as JSON literals with `json!` because that mirrors Anthropic's docs and keeps CP3 focused on the agent loop, not on designing a Rust model of JSON Schema. Flexible, but light on compile-time checking. If several tools make schema repetition or schema typos a real problem, extract small typed schema helpers from that concrete pressure rather than inventing a mini schema type system upfront.
 
-## Three phases, fourteen checkpoints plus one hardening checkpoint
+## Three phases, fourteen checkpoints plus one midstream hardening checkpoint
 
 | Phase | Checkpoints |
 |---|---|
@@ -453,6 +453,8 @@ Components: Surface.
 
 ## Beyond Checkpoint 14 (speculative)
 
-Subagents · auto-mode classifier · context compaction · memory extraction · cache-breakpoint strategy expansion for new context layers · richer TUI polish · remote daemon deployment.
+Concrete follow-ups from the Checkpoint 14 MVPs live in [`backlog.md`](backlog.md).
+
+Subagents · auto-mode classifier · context compaction · memory extraction · cache-breakpoint strategy expansion for new context layers.
 
 Each has a seam in [`architecture.md`](architecture.md). The principle is the same for all of them: extend the relevant component boundary only after concrete pressure exists.
