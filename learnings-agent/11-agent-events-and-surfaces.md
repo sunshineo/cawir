@@ -402,6 +402,79 @@ or connects to App Server, sends JSONL requests, receives event notifications,
 answers server approval requests, and renders the result. It should not copy the
 provider/session/tool loop.
 
+## Transport is below protocol
+
+Checkpoint 14e separates two ideas that are easy to mix together:
+
+```text
+protocol  = initialize, session/new, turn/submit, event, approval/tool
+transport = stdio JSONL, WebSocket text frames, future IDE bridge, future daemon socket
+```
+
+JSON-RPC-style message shape is the protocol. It says which fields mean request,
+response, notification, error, approval request, and event notification. Stdio and
+WebSocket should not each invent their own app semantics.
+
+The useful boundary is:
+
+```text
+transport reads/writes text messages
+protocol parses those messages and updates App Server state
+```
+
+In code, both transports now feed the same App Server protocol loop. Stdio turns
+newline-delimited stdin/stdout into text messages. WebSocket turns text frames into
+the same text messages. The handler for `initialize`, `shutdown`, `session/new`,
+`session/resume`, and `turn/submit` does not know whether the message came from a
+pipe or a socket.
+
+That matters because every new surface should only choose a transport and client
+UX. It should not copy the agent loop, session loading, approval handling, event
+emission, or provider runtime.
+
+The 14e WebSocket server is intentionally small: one local listener, one client,
+text frames only, no auth, no TLS, no browser UI, and no multi-client daemon state.
+Those features belong to later pressure. The lesson here is the protocol/transport
+split, not a production remote service.
+
+## Approval can be protocol-shaped before it is async
+
+There are three related but separate questions:
+
+```text
+Is approval direct terminal I/O or protocol-shaped?
+Is the client UI responsive while approval is pending?
+Is the Rust callback itself async?
+```
+
+Current cawir answers them differently by surface:
+
+```text
+REPL:
+  no App Server
+  direct terminal approval prompt
+  synchronous callback
+
+TUI over stdio App Server:
+  approval/tool protocol request
+  TUI stays responsive with a background reader and event loop
+  App Server callback is still synchronous
+
+WebSocket App Server:
+  same approval/tool protocol request
+  WebSocket I/O is async
+  App Server callback is still synchronous, bridged through channels
+```
+
+So WebSocket did not create a second approval protocol. It only created a second
+transport for the same protocol-shaped approval request.
+
+Longer term, approval is naturally async for App Server because it waits for an
+external client, and often a human, to answer. A daemon-quality design would likely
+make approval callbacks async and route each pending approval to the client that
+owns the turn. The 14e bridge is acceptable for the single-client MVP because it
+keeps the learning step focused on protocol versus transport.
+
 ## Structured failures serve machines and humans
 
 Checkpoint 8 had `StopFailure { message: String }`. That was readable, but future hooks or alternate surfaces would have had to parse a human string to answer basic questions.

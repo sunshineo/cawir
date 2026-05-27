@@ -2,11 +2,14 @@ use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
     io::{self, BufRead, Write},
-    rc::Rc,
+    sync::mpsc,
 };
 
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use tokio::net::TcpListener;
+use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 use crate::{
     Error, Result,
@@ -51,12 +54,88 @@ pub(crate) async fn run_stdio() -> Result<()> {
     Ok(())
 }
 
+pub(crate) async fn run_websocket(address: &str) -> Result<()> {
+    runtime::load_dotenv()?;
+    let client = runtime::build_http_client()?;
+    let listener = TcpListener::bind(address).await?;
+    eprintln!(
+        "cawir app-server websocket listening on ws://{}",
+        listener.local_addr()?
+    );
+    AppServer::new(client)
+        .run_websocket_listener(listener)
+        .await
+}
+
 struct AppServer {
     client: reqwest::Client,
     runtime: Option<Runtime>,
     session: Option<Session>,
     was_loaded_from_disk: bool,
     next_server_request_id: u64,
+}
+
+trait AppServerTransport {
+    fn read_text(&mut self) -> io::Result<Option<String>>;
+    fn send(&mut self, message: &ServerMessage) -> io::Result<()>;
+}
+
+struct StdioTransport<R, W> {
+    reader: R,
+    writer: W,
+    line: String,
+}
+
+impl<R, W> StdioTransport<R, W> {
+    fn new(reader: R, writer: W) -> Self {
+        Self {
+            reader,
+            writer,
+            line: String::new(),
+        }
+    }
+}
+
+impl<R, W> AppServerTransport for StdioTransport<R, W>
+where
+    R: BufRead,
+    W: Write,
+{
+    fn read_text(&mut self) -> io::Result<Option<String>> {
+        self.line.clear();
+        let bytes_read = self.reader.read_line(&mut self.line)?;
+        if bytes_read == 0 {
+            return Ok(None);
+        }
+        Ok(Some(self.line.clone()))
+    }
+
+    fn send(&mut self, message: &ServerMessage) -> io::Result<()> {
+        write_json_line(&mut self.writer, message)
+    }
+}
+
+struct ChannelTransport {
+    // Approval callbacks are still synchronous, so async WebSocket input is
+    // bridged into the protocol loop through a blocking receiver.
+    incoming: mpsc::Receiver<io::Result<String>>,
+    outgoing: tokio::sync::mpsc::UnboundedSender<String>,
+}
+
+impl AppServerTransport for ChannelTransport {
+    fn read_text(&mut self) -> io::Result<Option<String>> {
+        match self.incoming.recv() {
+            Ok(message) => message.map(Some),
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn send(&mut self, message: &ServerMessage) -> io::Result<()> {
+        let text = encode_json_message(message)?;
+        self.outgoing
+            .send(text)
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "websocket client closed"))
+    }
 }
 
 impl AppServer {
@@ -70,28 +149,73 @@ impl AppServer {
         }
     }
 
-    async fn run_stdio_loop(
-        mut self,
-        mut reader: impl BufRead,
-        mut writer: impl Write,
-    ) -> io::Result<()> {
-        let mut line = String::new();
+    async fn run_websocket_listener(self, listener: TcpListener) -> Result<()> {
+        let (stream, _) = listener.accept().await?;
+        let websocket = accept_async(stream)
+            .await
+            .map_err(|error| Error::Env(format!("websocket handshake failed: {error}")))?;
+        let (mut writer, mut reader) = websocket.split();
+        let (incoming_sender, incoming_receiver) = mpsc::channel();
+        let (outgoing_sender, mut outgoing_receiver) =
+            tokio::sync::mpsc::unbounded_channel::<String>();
 
-        loop {
-            line.clear();
-            let bytes_read = reader.read_line(&mut line)?;
-            if bytes_read == 0 {
-                break;
+        let reader_task = tokio::spawn(async move {
+            while let Some(message) = reader.next().await {
+                match message {
+                    Ok(Message::Text(text)) => {
+                        if incoming_sender.send(Ok(text.to_string())).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Message::Close(_)) => break,
+                    Ok(_) => {}
+                    Err(error) => {
+                        let _ = incoming_sender.send(Err(io::Error::other(error)));
+                        break;
+                    }
+                }
             }
+        });
+        let writer_task = tokio::spawn(async move {
+            while let Some(text) = outgoing_receiver.recv().await {
+                if writer.send(Message::Text(text.into())).await.is_err() {
+                    break;
+                }
+            }
+            let _ = writer.close().await;
+        });
 
-            let trimmed = line.trim_end_matches(['\r', '\n']);
+        let mut transport = ChannelTransport {
+            incoming: incoming_receiver,
+            outgoing: outgoing_sender,
+        };
+        let result = self.run_protocol_loop(&mut transport).await;
+        drop(transport);
+
+        let _ = writer_task.await;
+        reader_task.abort();
+        result?;
+        Ok(())
+    }
+
+    async fn run_stdio_loop(self, reader: impl BufRead, writer: impl Write) -> io::Result<()> {
+        let mut transport = StdioTransport::new(reader, writer);
+        self.run_protocol_loop(&mut transport).await
+    }
+
+    async fn run_protocol_loop(
+        mut self,
+        transport: &mut impl AppServerTransport,
+    ) -> io::Result<()> {
+        while let Some(text) = transport.read_text()? {
+            let trimmed = text.trim_end_matches(['\r', '\n']);
             if trimmed.is_empty() {
                 continue;
             }
 
-            let outcome = self.handle_line(trimmed, &mut reader, &mut writer).await?;
+            let outcome = self.handle_line(trimmed, transport).await?;
             if let Some(message) = outcome.message {
-                write_json_line(&mut writer, &message)?;
+                transport.send(&message)?;
             }
             if outcome.exit {
                 break;
@@ -104,8 +228,7 @@ impl AppServer {
     async fn handle_line(
         &mut self,
         line: &str,
-        reader: &mut impl BufRead,
-        writer: &mut impl Write,
+        transport: &mut impl AppServerTransport,
     ) -> io::Result<HandleOutcome> {
         let value = match serde_json::from_str::<Value>(line) {
             Ok(value) => value,
@@ -121,9 +244,7 @@ impl AppServer {
         };
 
         match serde_json::from_value::<ClientMessage>(value.clone()) {
-            Ok(ClientMessage::Request(request)) => {
-                self.handle_request(request, reader, writer).await
-            }
+            Ok(ClientMessage::Request(request)) => self.handle_request(request, transport).await,
             Ok(ClientMessage::Notification(notification)) => Ok(handle_notification(notification)),
             Ok(ClientMessage::Response(response)) => Ok(HandleOutcome {
                 message: Some(ServerMessage::error(
@@ -148,8 +269,7 @@ impl AppServer {
     async fn handle_request(
         &mut self,
         request: ClientRequest,
-        reader: &mut impl BufRead,
-        writer: &mut impl Write,
+        transport: &mut impl AppServerTransport,
     ) -> io::Result<HandleOutcome> {
         let exit = request.method == METHOD_SHUTDOWN;
         let message = match request.method.as_str() {
@@ -161,7 +281,7 @@ impl AppServer {
                     .await
             }
             METHOD_TURN_SUBMIT => {
-                self.turn_submit_response(request.id, request.params, reader, writer)
+                self.turn_submit_response(request.id, request.params, transport)
                     .await?
             }
             _ => ServerMessage::error(request.id, ProtocolError::method_not_found(&request.method)),
@@ -201,21 +321,25 @@ impl AppServer {
         &mut self,
         id: Value,
         params: Value,
-        reader: &mut impl BufRead,
-        writer: &mut impl Write,
+        transport: &mut impl AppServerTransport,
     ) -> io::Result<ServerMessage> {
         let params = match params_from_value::<TurnSubmitParams>(params) {
             Ok(params) => params,
             Err(error) => return Ok(ServerMessage::error(id, error)),
         };
 
-        self.submit_turn(id, params, reader, writer).await
+        self.submit_turn(id, params, transport).await
     }
 }
 
+fn encode_json_message(message: &ServerMessage) -> io::Result<String> {
+    serde_json::to_string(message).map_err(io::Error::other)
+}
+
 fn write_json_line(writer: &mut impl Write, message: &ServerMessage) -> io::Result<()> {
-    serde_json::to_writer(&mut *writer, message).map_err(io::Error::other)?;
-    writeln!(writer)?;
+    let message = encode_json_message(message)?;
+    writer.write_all(message.as_bytes())?;
+    writer.write_all(b"\n")?;
     writer.flush()
 }
 
@@ -292,8 +416,7 @@ impl AppServer {
         &mut self,
         id: Value,
         params: TurnSubmitParams,
-        reader: &mut impl BufRead,
-        writer: &mut impl Write,
+        transport: &mut impl AppServerTransport,
     ) -> io::Result<ServerMessage> {
         let Some(runtime) = self.runtime.as_ref() else {
             return Ok(ServerMessage::error(id, ProtocolError::session_not_found()));
@@ -315,15 +438,14 @@ impl AppServer {
         };
         let history_len_before_turn = session.messages.len();
 
-        let writer_cell = RefCell::new(writer);
-        let reader_cell = RefCell::new(reader);
-        let emit_error = Rc::new(RefCell::new(None));
+        let transport_cell = RefCell::new(transport);
+        let emit_error = RefCell::new(None);
         let next_request_id = Cell::new(self.next_server_request_id);
 
         let mut emit = {
-            let emit_error = Rc::clone(&emit_error);
             let session_id = session_id.clone();
-            let writer_cell = &writer_cell;
+            let transport_cell = &transport_cell;
+            let emit_error = &emit_error;
             move |event: AgentEvent| {
                 let message = ServerMessage::notification(
                     METHOD_EVENT,
@@ -332,7 +454,7 @@ impl AppServer {
                         "event": event
                     }),
                 );
-                if let Err(error) = write_json_line(&mut **writer_cell.borrow_mut(), &message) {
+                if let Err(error) = transport_cell.borrow_mut().send(&message) {
                     *emit_error.borrow_mut() = Some(error);
                 }
             }
@@ -341,12 +463,10 @@ impl AppServer {
         crate::agent::submit_user_prompt(&params.prompt, &mut session.messages, &mut emit);
 
         let mut approve_tool = {
-            let reader_cell = &reader_cell;
-            let writer_cell = &writer_cell;
+            let transport_cell = &transport_cell;
             |request: &ToolApprovalRequest| {
                 request_approval(
-                    reader_cell,
-                    writer_cell,
+                    transport_cell,
                     &next_request_id,
                     METHOD_APPROVAL_TOOL,
                     json!({
@@ -358,12 +478,10 @@ impl AppServer {
             }
         };
         let mut approve_plan = {
-            let reader_cell = &reader_cell;
-            let writer_cell = &writer_cell;
+            let transport_cell = &transport_cell;
             |plan_ready: &PlanReady| {
                 request_approval(
-                    reader_cell,
-                    writer_cell,
+                    transport_cell,
                     &next_request_id,
                     METHOD_APPROVAL_PLAN,
                     json!({
@@ -465,19 +583,21 @@ fn session_result(session: &Session, runtime: &Runtime, warnings: Vec<String>) -
     })
 }
 
-fn request_approval(
-    reader_cell: &RefCell<&mut impl BufRead>,
-    writer_cell: &RefCell<&mut impl Write>,
+fn request_approval<T>(
+    transport_cell: &RefCell<&mut T>,
     next_request_id: &Cell<u64>,
     method: &str,
     params: Value,
-) -> Result<bool> {
+) -> Result<bool>
+where
+    T: AppServerTransport,
+{
     let id = format!("server-{}", next_request_id.get());
     next_request_id.set(next_request_id.get() + 1);
     let message = ServerMessage::request(json!(id), method, params);
-    write_json_line(&mut **writer_cell.borrow_mut(), &message)?;
+    transport_cell.borrow_mut().send(&message)?;
 
-    let response = read_client_response(&mut **reader_cell.borrow_mut())?;
+    let response = read_client_response(&mut **transport_cell.borrow_mut())?;
     if response.id() != &json!(id) {
         return Err(Error::Env(format!(
             "approval response id mismatch: expected {id}, got {}",
@@ -493,18 +613,15 @@ fn request_approval(
     Ok(approval.approved)
 }
 
-fn read_client_response(reader: &mut impl BufRead) -> Result<ClientResponse> {
-    let mut line = String::new();
+fn read_client_response(transport: &mut impl AppServerTransport) -> Result<ClientResponse> {
     loop {
-        line.clear();
-        let bytes_read = reader.read_line(&mut line)?;
-        if bytes_read == 0 {
+        let Some(text) = transport.read_text()? else {
             return Err(Error::Env(
-                "client closed stdin while app-server waited for approval response".to_string(),
+                "client closed transport while app-server waited for approval response".to_string(),
             ));
-        }
+        };
 
-        let trimmed = line.trim_end_matches(['\r', '\n']);
+        let trimmed = text.trim_end_matches(['\r', '\n']);
         if trimmed.is_empty() {
             continue;
         }
@@ -799,7 +916,10 @@ impl ProtocolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::{SinkExt, StreamExt};
     use std::io::Cursor;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
 
     async fn run_protocol(input: &str) -> Vec<Value> {
         let mut output = Vec::new();
@@ -991,5 +1111,72 @@ mod tests {
                 "result": {}
             })]
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn websocket_transport_uses_same_protocol_messages() {
+        let (address_sender, address_receiver) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                address_sender.send(listener.local_addr().unwrap()).unwrap();
+                AppServer::new(reqwest::Client::new())
+                    .run_websocket_listener(listener)
+                    .await
+                    .unwrap();
+            });
+        });
+
+        let address = address_receiver.recv().unwrap();
+        let (mut socket, _) = connect_async(format!("ws://{address}")).await.unwrap();
+        socket
+            .send(Message::Text(
+                r#"{"id":1,"method":"initialize","params":{"protocol_version":1,"client_name":"test","client_version":"0.1"}}"#
+                    .into(),
+            ))
+            .await
+            .unwrap();
+
+        let initialize_message = socket.next().await.unwrap().unwrap().into_text().unwrap();
+        let initialize_response: Value = serde_json::from_str(&initialize_message).unwrap();
+        assert_eq!(
+            initialize_response,
+            json!({
+                "id": 1,
+                "result": {
+                    "protocol_version": 1,
+                    "server_name": "cawir",
+                    "server_version": env!("CARGO_PKG_VERSION"),
+                    "capabilities": {
+                        "sessions": true,
+                        "turns": true,
+                        "approvals": true
+                    }
+                }
+            })
+        );
+
+        socket
+            .send(Message::Text(
+                r#"{"id":2,"method":"shutdown","params":{}}"#.into(),
+            ))
+            .await
+            .unwrap();
+
+        let shutdown_message = socket.next().await.unwrap().unwrap().into_text().unwrap();
+        let shutdown_response: Value = serde_json::from_str(&shutdown_message).unwrap();
+        assert_eq!(
+            shutdown_response,
+            json!({
+                "id": 2,
+                "result": {}
+            })
+        );
+
+        server.join().unwrap();
     }
 }

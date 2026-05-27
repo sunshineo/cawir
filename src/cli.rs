@@ -18,13 +18,23 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum CliCommand {
     #[command(name = "app-server")]
-    AppServer,
+    AppServer(AppServerArgs),
 
     #[command(name = "exec")]
     Exec(ExecArgs),
 
     #[command(name = "tui")]
     Tui(TuiArgs),
+}
+
+#[derive(Debug, Args)]
+struct AppServerArgs {
+    #[arg(
+        long,
+        value_name = "ADDR",
+        help = "Accept one App Server WebSocket client at this address instead of stdio"
+    )]
+    websocket: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -93,7 +103,10 @@ pub async fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(CliCommand::AppServer) => app_server::run_stdio().await,
+        Some(CliCommand::AppServer(args)) => match args.websocket {
+            Some(address) => app_server::run_websocket(&address).await,
+            None => app_server::run_stdio().await,
+        },
         Some(CliCommand::Exec(args)) => exec::run(exec::ExecOptions {
             prompt: args.prompt.join(" "),
             provider: args.provider,
