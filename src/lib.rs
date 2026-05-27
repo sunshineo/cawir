@@ -1,5 +1,6 @@
 mod agent;
 mod anthropic;
+mod app_client;
 mod app_server;
 mod auth;
 mod cli;
@@ -20,6 +21,7 @@ pub mod session;
 mod settings;
 mod skills;
 mod tools;
+mod tui;
 
 pub use cli::run;
 pub use error::{Error, Result};

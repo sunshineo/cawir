@@ -1,6 +1,6 @@
 use clap::{Args, Parser, Subcommand};
 
-use crate::{Result, app_server, exec, repl};
+use crate::{Result, app_server, exec, repl, tui};
 
 #[derive(Debug, Parser)]
 #[command(name = "cawir", about = "Coding Agent Written in Rust")]
@@ -22,6 +22,9 @@ enum CliCommand {
 
     #[command(name = "exec")]
     Exec(ExecArgs),
+
+    #[command(name = "tui")]
+    Tui(TuiArgs),
 }
 
 #[derive(Debug, Args)]
@@ -64,6 +67,28 @@ struct ExecArgs {
     prompt: Vec<String>,
 }
 
+#[derive(Debug, Args)]
+struct TuiArgs {
+    #[arg(
+        long,
+        value_name = "PROVIDER",
+        conflicts_with = "resume",
+        help = "Create a new TUI session with this provider"
+    )]
+    provider: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "MODEL",
+        conflicts_with = "resume",
+        help = "Create a new TUI session with this model"
+    )]
+    model: Option<String>,
+
+    #[arg(long, value_name = "ID", help = "Resume an existing saved session")]
+    resume: Option<String>,
+}
+
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
 
@@ -76,6 +101,11 @@ pub async fn run() -> Result<()> {
             resume: args.resume,
             json_output: args.json,
             approve: args.approve,
+        }),
+        Some(CliCommand::Tui(args)) => tui::run(tui::TuiOptions {
+            provider: args.provider,
+            model: args.model,
+            resume: args.resume,
         }),
         None => {
             repl::run(repl::ReplOptions {

@@ -16,3 +16,5 @@ base64 = "0.22.1"
 rpassword = "7.5.2"
 clap = { version = "4.5.38", features = ["derive"] }
 uuid = { version = "1.16.0", features = ["v4"] }
+ratatui = "0.29"
+crossterm = "0.28"

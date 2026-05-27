@@ -1,24 +1,18 @@
-use std::{
-    env,
-    io::{self, BufRead, BufReader, Write},
-    process::{Command, Stdio},
-};
+use std::io::{self, BufRead, Write};
 
-use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::{Error, Result, events::AgentEvent};
+use crate::{
+    Error, Result,
+    app_client::{
+        self, METHOD_APPROVAL_PLAN, METHOD_APPROVAL_TOOL, METHOD_EVENT, METHOD_INITIALIZE,
+        METHOD_SESSION_NEW, METHOD_SESSION_RESUME, METHOD_SHUTDOWN, METHOD_TURN_SUBMIT,
+        PROTOCOL_VERSION, ServerMessage, ServerNotification, ServerRequest,
+    },
+    events::AgentEvent,
+};
 
-const PROTOCOL_VERSION: u32 = 1;
 const CLIENT_NAME: &str = "cawir-exec";
-const METHOD_INITIALIZE: &str = "initialize";
-const METHOD_SHUTDOWN: &str = "shutdown";
-const METHOD_SESSION_NEW: &str = "session/new";
-const METHOD_SESSION_RESUME: &str = "session/resume";
-const METHOD_TURN_SUBMIT: &str = "turn/submit";
-const METHOD_APPROVAL_TOOL: &str = "approval/tool";
-const METHOD_APPROVAL_PLAN: &str = "approval/plan";
-const METHOD_EVENT: &str = "event";
 
 pub(crate) struct ExecOptions {
     pub(crate) prompt: String,
@@ -30,37 +24,24 @@ pub(crate) struct ExecOptions {
 }
 
 pub(crate) fn run(options: ExecOptions) -> Result<()> {
-    let mut child = Command::new(env::current_exe()?)
-        .arg("app-server")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()?;
-
-    let mut child_stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| Error::Env("failed to open app-server stdin".to_string()))?;
-    let child_stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| Error::Env("failed to open app-server stdout".to_string()))?;
-    let mut child_stdout = BufReader::new(child_stdout);
+    let mut process = app_client::AppServerProcess::spawn()?;
     let mut stdout = io::stdout().lock();
     let mut stderr = io::stderr().lock();
-
-    let client_result = run_client_on_protocol(
-        &mut child_stdout,
-        &mut child_stdin,
-        &mut stdout,
-        &mut stderr,
-        &options,
-    );
+    let client_result = {
+        let (child_stdout, child_stdin) = process.io_mut()?;
+        run_client_on_protocol(
+            child_stdout,
+            child_stdin,
+            &mut stdout,
+            &mut stderr,
+            &options,
+        )
+    };
 
     if client_result.is_err() {
-        let _ = child.kill();
+        let _ = process.kill();
     }
-    let status = child.wait()?;
+    let status = process.wait()?;
     client_result?;
 
     if !status.success() {
@@ -168,7 +149,7 @@ fn request_result(
 ) -> Result<Value> {
     let id = *next_id;
     *next_id += 1;
-    write_json_line(writer, &ClientRequest { id, method, params })?;
+    app_client::write_request(writer, id, method, params)?;
     read_until_response(reader, writer, stdout, stderr, options, renderer, id)
 }
 
@@ -182,12 +163,12 @@ fn read_until_response(
     expected_id: u64,
 ) -> Result<Value> {
     loop {
-        match read_server_message(reader)? {
+        match app_client::read_server_message(reader)? {
             ServerMessage::Response(response) => {
                 if response.id() != &json!(expected_id) {
                     return Err(Error::Env(format!(
                         "unexpected app-server response id: expected {expected_id}, got {}",
-                        compact_json(response.id())
+                        app_client::compact_json(response.id())
                     )));
                 }
                 return response.into_result();
@@ -212,7 +193,7 @@ fn answer_server_request(
     match request.method.as_str() {
         METHOD_APPROVAL_TOOL | METHOD_APPROVAL_PLAN => {
             if options.json_output {
-                write_json_line(
+                app_client::write_json_line(
                     stdout,
                     &json!({
                         "type": "approval",
@@ -230,13 +211,7 @@ fn answer_server_request(
                 };
                 writeln!(stderr, "{} {}: {}", request.method, label, decision)?;
             }
-            write_json_line(
-                writer,
-                &ClientResponse {
-                    id: request.id,
-                    result: json!({ "approved": options.approve }),
-                },
-            )?;
+            app_client::write_response(writer, request.id, json!({ "approved": options.approve }))?;
             Ok(())
         }
         other => Err(Error::Env(format!(
@@ -274,37 +249,6 @@ fn required_string(value: &Value, key: &str) -> Result<String> {
         .ok_or_else(|| Error::Env(format!("app-server result missing string field `{key}`")))
 }
 
-fn write_json_line<T: Serialize>(writer: &mut impl Write, value: &T) -> Result<()> {
-    serde_json::to_writer(&mut *writer, value).map_err(|error| Error::Env(error.to_string()))?;
-    writeln!(writer)?;
-    writer.flush()?;
-    Ok(())
-}
-
-fn read_server_message(reader: &mut impl BufRead) -> Result<ServerMessage> {
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let bytes_read = reader.read_line(&mut line)?;
-        if bytes_read == 0 {
-            return Err(Error::Env(
-                "app-server closed stdout before responding".to_string(),
-            ));
-        }
-
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        return serde_json::from_str(trimmed).map_err(|error| Error::Env(error.to_string()));
-    }
-}
-
-fn compact_json(value: &Value) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
-}
-
 struct ExecRenderer {
     json_output: bool,
     saw_text_delta: bool,
@@ -330,10 +274,11 @@ impl ExecRenderer {
             return Ok(());
         }
 
-        let params: EventNotificationParams = serde_json::from_value(notification.params)
-            .map_err(|error| Error::Env(error.to_string()))?;
+        let params: app_client::EventNotificationParams =
+            serde_json::from_value(notification.params)
+                .map_err(|error| Error::Env(error.to_string()))?;
         if self.json_output {
-            write_json_line(
+            app_client::write_json_line(
                 stdout,
                 &json!({
                     "type": "event",
@@ -342,7 +287,9 @@ impl ExecRenderer {
                 }),
             )?;
         } else {
-            self.render_plain_event(stdout, stderr, params.event)?;
+            let event: AgentEvent = serde_json::from_value(params.event)
+                .map_err(|error| Error::Env(error.to_string()))?;
+            self.render_plain_event(stdout, stderr, event)?;
         }
         Ok(())
     }
@@ -404,7 +351,7 @@ impl ExecRenderer {
 
     fn finish_turn(&mut self, stdout: &mut impl Write, turn_result: &Value) -> Result<()> {
         if self.json_output {
-            write_json_line(
+            app_client::write_json_line(
                 stdout,
                 &json!({
                     "type": "turn_result",
@@ -423,79 +370,6 @@ impl ExecRenderer {
         }
         Ok(())
     }
-}
-
-#[derive(Serialize)]
-struct ClientRequest<'a> {
-    id: u64,
-    method: &'a str,
-    params: Value,
-}
-
-#[derive(Serialize)]
-struct ClientResponse {
-    id: Value,
-    result: Value,
-}
-
-#[derive(Debug, Deserialize, PartialEq)]
-#[serde(untagged)]
-enum ServerMessage {
-    Response(ServerResponse),
-    Request(ServerRequest),
-    Notification(ServerNotification),
-}
-
-#[derive(Debug, Deserialize, PartialEq)]
-#[serde(untagged)]
-enum ServerResponse {
-    Success { id: Value, result: Value },
-    Failure { id: Value, error: ProtocolError },
-}
-
-impl ServerResponse {
-    fn id(&self) -> &Value {
-        match self {
-            Self::Success { id, .. } | Self::Failure { id, .. } => id,
-        }
-    }
-
-    fn into_result(self) -> Result<Value> {
-        match self {
-            Self::Success { result, .. } => Ok(result),
-            Self::Failure { error, .. } => Err(Error::Env(format!(
-                "app-server error {}: {}",
-                error.code, error.message
-            ))),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, PartialEq)]
-struct ServerRequest {
-    id: Value,
-    method: String,
-    #[serde(default)]
-    params: Value,
-}
-
-#[derive(Debug, Deserialize, PartialEq)]
-struct ServerNotification {
-    method: String,
-    #[serde(default)]
-    params: Value,
-}
-
-#[derive(Debug, Deserialize, PartialEq)]
-struct ProtocolError {
-    code: i64,
-    message: String,
-}
-
-#[derive(Debug, Deserialize, PartialEq)]
-struct EventNotificationParams {
-    session_id: String,
-    event: AgentEvent,
 }
 
 #[cfg(test)]

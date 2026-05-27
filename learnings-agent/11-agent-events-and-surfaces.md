@@ -373,6 +373,35 @@ explicitly interactive command, not in the headless `exec` default path.
 This keeps the direction honest: new surfaces should become protocol clients or
 thin adapters, not copies of the harness.
 
+## TUI proves value through persistent state
+
+Checkpoint 14d starts the TUI as another App Server client. Its first job is not
+to be a full terminal IDE. Its job is to show why a terminal UI is more powerful
+than the REPL.
+
+The REPL is a single linear stream:
+
+```text
+prompt -> output -> prompt -> output
+```
+
+The TUI keeps several pieces of state visible at the same time:
+
+- transcript pane for user and assistant messages
+- status pane for provider, model, mode, session, and keybindings
+- tool timeline pane for requested and completed tools
+- approval pane for pending `approval/tool` or `approval/plan`
+- input pane for the next user prompt
+
+That makes the same App Server event stream easier to understand. Events no
+longer have to be interleaved into one scrollback log; each event can update the
+part of the interface it belongs to.
+
+The important design rule is the same as `exec`: the TUI is a client. It starts
+or connects to App Server, sends JSONL requests, receives event notifications,
+answers server approval requests, and renders the result. It should not copy the
+provider/session/tool loop.
+
 ## Structured failures serve machines and humans
 
 Checkpoint 8 had `StopFailure { message: String }`. That was readable, but future hooks or alternate surfaces would have had to parse a human string to answer basic questions.
