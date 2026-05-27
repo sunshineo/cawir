@@ -4,6 +4,187 @@ This file holds concrete follow-ups that are worth keeping but are not part of t
 main checkpoint sequence yet. Promote an item into [`roadmap.md`](roadmap.md) only
 when we decide to actively work it as a checkpoint or sub-step.
 
+## Prompt engineering and instruction customization backlog
+
+Current state: cawir has the right structural seam for prompt assembly, but the
+actual prompt is intentionally bare-bones. `prompt.rs` currently emits identity,
+behavior, environment, project guidance, and active skills. Project guidance comes
+from `AGENTS.md` / `CLAUDE.md` files in the project hierarchy, active skill bodies
+are inserted only after a prompt match, and tool schemas stay in provider-native
+tool fields instead of prompt text.
+
+That is a good foundation for learning request boundaries, but it is not yet a
+serious coding-agent prompt. Mature coding agents put substantial design into
+their base operating prompt, tool-use policy, instruction precedence, project and
+user customization, prompt inspection, and prompt-regression tests. cawir should
+add those pieces deliberately without trying to clone private prompts from other
+tools.
+
+### Recommended order
+
+1. Define cawir's instruction hierarchy and conflict rules.
+2. Add user-level and cawir-owned project instruction sources.
+3. Expand the base operating prompt into named, testable sections.
+4. Add mode, permission, and workflow guidance to prompt assembly.
+5. Review and improve built-in tool descriptions and schemas.
+6. Add prompt-injection and data-vs-instruction boundaries.
+7. Add prompt inspection and prompt snapshot tooling.
+8. Add prompt-behavior regression scenarios for common coding-agent tasks.
+
+### Instruction hierarchy and conflict rules
+
+Define which instruction sources exist and which one wins when they conflict.
+
+The first version should be explicit and small, for example:
+
+- built-in cawir operating rules
+- user-level cawir instructions
+- project-level cawir instructions
+- nested project guidance from `AGENTS.md` / `CLAUDE.md`
+- active skill instructions
+- direct user prompt for the current turn
+
+The loader currently concatenates project guidance from ancestors to children, but
+there is no documented precedence model, no conflict language in the prompt, and
+no place for user-global preferences.
+
+Rust topics: typed instruction sources, deterministic ordering, source labels,
+tests for precedence and duplicate handling.
+
+### User and project instruction sources
+
+Add cawir-owned instruction files in addition to compatibility loading for
+`AGENTS.md` / `CLAUDE.md`.
+
+Possible sources:
+
+- OS config directory user instructions, such as `instructions.md`
+- project `.cawir/instructions.md`
+- project `.cawir/instructions.local.md` for uncommitted local preferences
+- existing `AGENTS.md` / `CLAUDE.md` compatibility files
+
+Keep the current `AGENTS.md` / `CLAUDE.md` support, but make cawir's own files the
+documented native path so this project is not implicitly shaped around another
+agent's config format.
+
+Rust topics: config path discovery, merge order, local-only files, source
+metadata for rendered prompt sections.
+
+### Base operating prompt
+
+Replace the tiny behavior string with a set of named operating sections.
+
+Candidate sections:
+
+- role and scope: cawir is a small coding agent and learning vehicle
+- collaboration style: explain Rust concepts when useful, avoid speculative
+  abstractions, keep changes scoped
+- exploration discipline: inspect files before editing, prefer `rg` for search,
+  read local context before asking
+- implementation discipline: preserve user changes, avoid destructive commands,
+  use focused edits, verify before claiming completion
+- answer style: concise final summaries, concrete file references, no hidden
+  assumptions
+
+This should stay cawir-specific. The goal is not to paste another agent's system
+prompt into cawir; it is to encode the behavior we actually want this agent to
+learn.
+
+Rust topics: prompt section structs, section rendering tests, keeping stable
+sections cache-friendly.
+
+### Mode, permission, and workflow guidance
+
+Prompt assembly should tell the model what mode it is currently in and how that
+changes behavior.
+
+Examples:
+
+- `default`: read freely, ask before mutating tools
+- `plan`: produce a plan, do not attempt mutating tools
+- `accept-edits`: edits may proceed, shell still needs approval
+- `bypass`: powerful mode, still avoid destructive actions unless explicitly
+  requested
+
+Today the tool set and policy code enforce those rules, but the system prompt does
+not explain the active mode. Giving the model explicit mode context should reduce
+denied tool attempts and make plan mode easier to reason about.
+
+Rust topics: passing mode into prompt assembly, volatile vs cache-stable prompt
+sections, tests for mode-specific prompt text.
+
+### Tool prompt and schema quality
+
+Review built-in tool descriptions as prompt-engineering artifacts, not just Rust
+metadata.
+
+Follow-ups:
+
+- make `edit_file` the preferred routine edit path and reserve `write_file` for
+  new files or full rewrites
+- tell the model how to recover from visible truncation markers
+- explain when to use `shell` instead of dedicated file tools
+- document that external MCP/plugin tools may be slower, broader, or
+  approval-gated
+- add examples or tighter field descriptions where schemas are ambiguous
+
+Tool definitions affect both model behavior and prompt-cache keys, so changes
+should be deliberate and covered by stable fingerprint tests.
+
+Rust topics: schema helper tests, golden tool-definition snapshots,
+fingerprint-aware changes.
+
+### Data-vs-instruction and prompt-injection boundaries
+
+Add explicit prompt rules that tool outputs, file contents, command output, MCP
+results, and plugin results are data to analyze, not higher-priority instructions
+to obey.
+
+This matters once the agent reads arbitrary repository files or external tool
+results. A file can say "ignore previous instructions"; cawir should treat that as
+file content unless the user explicitly asks to follow it.
+
+Rust topics: prompt wording tests, provider-neutral section placement, regression
+fixtures with hostile file content.
+
+### Prompt inspection and debug tooling
+
+Add a way to inspect what cawir is about to send before or during a turn.
+
+Possible surfaces:
+
+- `/prompt` in the REPL to render the current assembled system prompt
+- `/tools` to show advertised tool definitions and fingerprint
+- `cawir exec --show-prompt` or a protocol method for App Server clients
+- redaction rules if future prompt sections include secrets or credential source
+  metadata
+
+This project is for learning, so seeing the prompt is a feature, not just a debug
+escape hatch.
+
+Rust topics: command registry additions, rendering without making a model call,
+redaction helpers, protocol result shapes.
+
+### Prompt regression and behavior tests
+
+Add tests that lock down prompt assembly and expected agent behavior around common
+coding tasks.
+
+Start with offline tests:
+
+- snapshot rendered prompt sections for a fixture project
+- snapshot tool definitions and descriptions
+- verify nested instruction ordering and duplicates
+- verify active skill insertion and non-activated skill omission
+- fake-provider scenarios where the model should choose `read_file`,
+  `edit_file`, `shell`, or `exit_plan_mode`
+
+Live model evals can come later. The first goal is to make prompt changes
+reviewable instead of invisible.
+
+Rust topics: fixture workspaces, golden snapshots without snapshot-test crates at
+first, fake provider behavior tests.
+
 ## Context management and compaction backlog
 
 Current state: cawir has a solid prompt, tool, and cache foundation, but it does
