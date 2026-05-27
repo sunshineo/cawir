@@ -5,6 +5,7 @@ mod auth;
 mod cli;
 pub mod error;
 mod events;
+mod exec;
 mod hooks;
 mod mcp;
 mod ollama;

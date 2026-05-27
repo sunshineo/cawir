@@ -327,6 +327,52 @@ That is still interactive at the product level. A TUI, IDE extension, or web
 client may show a dialog to the user. The important boundary is that App Server
 only sees structured client responses, not terminal keystrokes.
 
+## Exec is the first App Server client
+
+Checkpoint 14c makes `cawir exec "..."` a client of `cawir app-server` instead
+of another direct caller of `runtime.rs`.
+
+The process shape is:
+
+```text
+cawir exec "prompt"
+  starts child process: cawir app-server
+  sends initialize
+  sends session/new or session/resume
+  sends turn/submit
+  reads event notifications and approval requests
+  sends shutdown
+```
+
+This is the first time the App Server is visible as a real foundation instead of
+only a manually testable JSONL loop. The one-shot CLI gets the same protocol path
+that a future TUI or IDE client would use.
+
+The boundary is intentionally small. `exec` does not own provider setup,
+session loading, tool execution, hooks, skills, or the model loop. It only owns
+client behavior:
+
+- render assistant text for a human CLI
+- render structured JSONL when `--json` is requested
+- answer App Server approval requests with a simple policy
+- turn protocol errors into CLI errors
+
+Because `exec` is headless, approval must be deterministic. It should not pause
+for terminal input when App Server sends `approval/tool` or `approval/plan`.
+The 14c policy is:
+
+```text
+default   -> answer approved=false
+--approve -> answer approved=true
+```
+
+That keeps scripts from hanging on an unseen prompt. If a future surface wants
+human-in-the-loop approvals, that belongs in a TUI, IDE client, or another
+explicitly interactive command, not in the headless `exec` default path.
+
+This keeps the direction honest: new surfaces should become protocol clients or
+thin adapters, not copies of the harness.
+
 ## Structured failures serve machines and humans
 
 Checkpoint 8 had `StopFailure { message: String }`. That was readable, but future hooks or alternate surfaces would have had to parse a human string to answer basic questions.

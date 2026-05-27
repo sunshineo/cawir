@@ -1,6 +1,6 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
-use crate::{Result, app_server, repl};
+use crate::{Result, app_server, exec, repl};
 
 #[derive(Debug, Parser)]
 #[command(name = "cawir", about = "Coding Agent Written in Rust")]
@@ -19,6 +19,49 @@ struct Cli {
 enum CliCommand {
     #[command(name = "app-server")]
     AppServer,
+
+    #[command(name = "exec")]
+    Exec(ExecArgs),
+}
+
+#[derive(Debug, Args)]
+struct ExecArgs {
+    #[arg(
+        long,
+        value_name = "PROVIDER",
+        conflicts_with = "resume",
+        help = "Create a new exec session with this provider"
+    )]
+    provider: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "MODEL",
+        conflicts_with = "resume",
+        help = "Create a new exec session with this model"
+    )]
+    model: Option<String>,
+
+    #[arg(long, value_name = "ID", help = "Resume an existing saved session")]
+    resume: Option<String>,
+
+    #[arg(long, help = "Emit JSONL events and turn result")]
+    json: bool,
+
+    #[arg(
+        long,
+        help = "Approve all App Server approval requests; default is to deny"
+    )]
+    approve: bool,
+
+    #[arg(
+        value_name = "PROMPT",
+        required = true,
+        num_args = 1..,
+        trailing_var_arg = true,
+        help = "Prompt to submit as one App Server turn"
+    )]
+    prompt: Vec<String>,
 }
 
 pub async fn run() -> Result<()> {
@@ -26,6 +69,14 @@ pub async fn run() -> Result<()> {
 
     match cli.command {
         Some(CliCommand::AppServer) => app_server::run_stdio().await,
+        Some(CliCommand::Exec(args)) => exec::run(exec::ExecOptions {
+            prompt: args.prompt.join(" "),
+            provider: args.provider,
+            model: args.model,
+            resume: args.resume,
+            json_output: args.json,
+            approve: args.approve,
+        }),
         None => {
             repl::run(repl::ReplOptions {
                 resume: cli.resume,
